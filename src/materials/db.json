@@ -1,0 +1,95 @@
+[
+  {
+    "id": "steel_4340",
+    "name": "Сталь 4340 (прокси RHA)",
+    "class": "metal",
+    "density": { "value": 7.84, "unit": "g/cm3", "source": "batra", "status": "verified" },
+    "elastic": { "G": 76, "unit": "GPa", "source": "batra", "status": "verified" },
+    "eos": {
+      "model": "mie_gruneisen", "C0": 3.935, "s": 1.587, "gamma0": 1.69,
+      "source": "mech_ind_2017", "status": "verified",
+      "note": "Banerjee 2005 даёт для того же набора Brown et al. s = 1,578 — сверить по первоисточнику"
+    },
+    "strength": {
+      "model": "johnson_cook", "A": 0.792, "B": 0.51, "n": 0.26, "C": 0.014, "m": 1.03, "Tm": 1793,
+      "source": "jc1983", "status": "verified"
+    },
+    "damage": {
+      "model": "jc_fracture", "D": [0.05, 3.44, -2.12, 0.002, 0.61],
+      "source": "cjsm", "status": "check", "note": "D1–D3 verified, D4–D5 check"
+    },
+    "spall": { "p_min": null, "status": "tuned" },
+    "thermal": { "cp": 477, "beta": 0.9, "source": "batra", "status": "verified", "note": "β = 0,9 — спека 5.6" },
+    "visual": { "color": "#8A93A6" }
+  },
+  {
+    "id": "copper_ofhc",
+    "name": "Медь OFHC",
+    "class": "metal",
+    "density": { "value": 8.93, "unit": "g/cm3", "source": "bertarelli", "status": "verified" },
+    "elastic": { "G": 46, "unit": "GPa", "source": "spec", "status": "check" },
+    "eos": { "model": "mie_gruneisen", "C0": 3.94, "s": 1.48, "gamma0": 1.96, "source": "chemie_de", "status": "verified" },
+    "strength": {
+      "model": "johnson_cook", "A": 0.09, "B": 0.292, "n": 0.31, "C": 0.025, "m": 1.09, "Tm": 1356,
+      "source": "jc1983", "status": "verified"
+    },
+    "damage": {
+      "model": "jc_fracture", "D": [0.54, 4.89, -3.03, 0.014, 1.12],
+      "source": "cjsm", "status": "check", "note": "D1–D3 verified, D4–D5 check"
+    },
+    "spall": { "p_min": -1.9, "source": "li_ecf19", "status": "check" },
+    "thermal": { "cp": 391, "beta": 0.9, "source": "bertarelli", "status": "verified", "note": "β = 0,9 — спека 5.6" },
+    "visual": { "color": "#C8794A" }
+  },
+  {
+    "id": "armco_iron",
+    "name": "Армко-железо",
+    "class": "metal",
+    "density": { "value": 7.89, "unit": "g/cm3", "source": "jc1983", "status": "verified" },
+    "elastic": { "G": 81.9, "unit": "GPa", "source": "banerjee2005", "status": "check", "note": "значение для 4340/железа" },
+    "eos": {
+      "model": "mie_gruneisen", "C0": 3.935, "s": 1.578, "gamma0": 1.69,
+      "source": "banerjee2005", "status": "check", "note": "железо по Brown et al. 2000, Γ0 по Gust"
+    },
+    "strength": {
+      "model": "johnson_cook", "A": 0.175, "B": 0.38, "n": 0.32, "C": 0.06, "m": 0.55, "Tm": 1811,
+      "source": "jc1983", "status": "verified"
+    },
+    "damage": { "model": "none" },
+    "spall": { "p_min": null, "status": "tuned" },
+    "thermal": { "cp": 452, "beta": 0.9, "source": "jc1983", "status": "verified", "note": "β = 0,9 — спека 5.6" },
+    "visual": { "color": "#9AA0A8" }
+  },
+  {
+    "id": "w_alloy",
+    "name": "Вольфрамовый сплав",
+    "class": "metal",
+    "density": { "value": 18.0, "unit": "g/cm3", "source": "bertarelli", "status": "verified", "note": "Inermet180" },
+    "elastic": { "G": 160, "unit": "GPa", "source": "spec", "status": "check" },
+    "eos": { "model": "mie_gruneisen", "C0": 4.03, "s": 1.24, "gamma0": 1.54, "source": "spec", "status": "check" },
+    "strength": {
+      "model": "johnson_cook", "A": 1.506, "B": 0.177, "n": 0.12, "C": 0.016, "m": 1.0, "Tm": 1723,
+      "source": "jc1983", "status": "verified"
+    },
+    "damage": { "model": "none" },
+    "spall": { "p_min": null, "status": "tuned" },
+    "thermal": { "cp": 150, "beta": 0.9, "source": "bertarelli", "status": "verified", "note": "β = 0,9 — спека 5.6" },
+    "visual": { "color": "#5F6B7A" }
+  },
+  {
+    "id": "demo_elastomer",
+    "name": "Демо-эластомер",
+    "class": "elastomer",
+    "density": { "value": 1.1, "unit": "g/cm3", "source": "m0_demo", "status": "tuned" },
+    "elastic": { "G": 0.00345, "unit": "GPa", "source": "m0_demo", "status": "tuned" },
+    "eos": {
+      "model": "mie_gruneisen", "C0": 0.174, "s": 0, "gamma0": 0,
+      "source": "m0_demo", "status": "tuned", "note": "линейный объём: K = ρ·C0² ≈ 0,033 ГПа"
+    },
+    "strength": { "model": "elastic", "source": "m0_demo", "status": "tuned" },
+    "damage": { "model": "none" },
+    "spall": { "p_min": null, "status": "tuned" },
+    "thermal": { "cp": 1900, "beta": 0.9, "source": "m0_demo", "status": "tuned" },
+    "visual": { "color": "#E0A04A" }
+  }
+]
