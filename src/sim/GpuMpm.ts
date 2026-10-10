@@ -118,7 +118,12 @@ export class GpuMpm {
       size: particleBytes,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
-    this.grid = device.createBuffer({ label: 'grid-i32', size: gridBytes, usage: GPUBufferUsage.STORAGE });
+    // COPY_SRC — чтобы при переполнении фиксированной точки прочитать накопители и найти узел
+    this.grid = device.createBuffer({
+      label: 'grid-i32',
+      size: gridBytes,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
     this.gridV = device.createBuffer({
       label: 'grid-v',
       size: GRID_V_STRIDE * this.gridNodes * 4,
