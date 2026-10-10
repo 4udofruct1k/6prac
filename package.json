@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.1",
   "type": "module",
-  "description": "TERMINAL — симулятор пробития брони (2D MLS-MPM на WebGPU). Спека: docs/ARMOR_SPEC_v0.1.pdf",
+  "description": "TERMINAL — симулятор пробития брони (2D MLS-MPM на WebGPU). Спека: docs/ARMOR_SPEC.md",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

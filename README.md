@@ -3,7 +3,8 @@
 Игра-симулятор терминальной баллистики: 2D-разрез брони, частицы, физически честные числа.
 Решатель — явный 2D MLS-MPM на WebGPU (compute-шейдеры WGSL), одна кодовая база для ПК и Android.
 
-Спека: [`docs/ARMOR_SPEC_v0.1.pdf`](docs/ARMOR_SPEC_v0.1.pdf). Она — источник правды по физике, числам и вехам.
+Спека: [ARMOR_SPEC v0.1 в Claude Docs](https://claude.ai/artifact/XTpFrjDVeTQ7sCFfkSQdRt) — источник правды по физике,
+числам и вехам. В репо лежит её выгрузка в Markdown: [`docs/ARMOR_SPEC.md`](docs/ARMOR_SPEC.md).
 
 ## Статус: веха M0 — технический спайк
 
