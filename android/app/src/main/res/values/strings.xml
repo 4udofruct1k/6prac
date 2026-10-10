@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">TERMINAL</string>
+    <string name="title_activity_main">TERMINAL</string>
+    <string name="package_name">app.terminal.armorsim</string>
+    <string name="custom_url_scheme">app.terminal.armorsim</string>
+</resources>
