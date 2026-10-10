@@ -66,6 +66,9 @@ export function DemoView({ gpu }: { gpu: GpuContext }) {
     let sim: GpuMpm | undefined;
     let renderer: ParticleRenderer | undefined;
     let reading = false;
+    // Не больше одного кадра в очереди GPU: если устройство не успевает за мкс/кадр, событие идёт
+    // медленнее, а не копит работу в очереди
+    let inFlight = false;
 
     const resize = () => {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -100,6 +103,10 @@ export function DemoView({ gpu }: { gpu: GpuContext }) {
       let hudT = 0;
       const frame = () => {
         if (disposed || !sim || !renderer) return;
+        if (inFlight) {
+          raf = requestAnimationFrame(frame);
+          return;
+        }
         const l = live.current;
         sim.setVizMode(l.viz);
         const encoder = device.createCommandEncoder();
@@ -111,6 +118,11 @@ export function DemoView({ gpu }: { gpu: GpuContext }) {
         const [min, max] = rangeOf(l.viz);
         renderer.encode(encoder, sim, l.viz, { min, max });
         device.queue.submit([encoder.finish()]);
+        inFlight = true;
+        device.queue.onSubmittedWorkDone().then(
+          () => (inFlight = false),
+          () => (inFlight = false),
+        );
         frames++;
         const now = performance.now();
         if (now - fpsT0 > 500) {

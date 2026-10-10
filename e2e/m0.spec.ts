@@ -31,7 +31,7 @@ async function openApp(page: Page, query = '') {
 for (const compat of [false, true]) {
   test.describe(compat ? 'режим совместимости' : 'core', () => {
     test('самопроверка ядра: детерминизм и совпадение с CPU-эталоном', async ({ page }) => {
-      await openApp(page, compat ? '?compat' : '');
+      await openApp(page, compat ? '?tab=device&compat' : '?tab=device');
       const r = await page.evaluate(async () => {
         const ctx = await window.__armor.gpu();
         if (!('device' in ctx)) throw new Error(ctx.reason);
@@ -52,7 +52,8 @@ for (const compat of [false, true]) {
 
 for (const mode of ['full', 'l2'] as const) {
   test(`бенчмарк (${mode}): пресет «Минимум» считает конечные числа`, async ({ page }) => {
-    await openApp(page);
+    // Не на вкладке «Демо»: демо считает на том же GPU и отнимает время у замера
+    await openApp(page, '?tab=device');
     const r = await page.evaluate(async (mode) => {
       const ctx = await window.__armor.gpu();
       if (!('device' in ctx)) throw new Error(ctx.reason);
