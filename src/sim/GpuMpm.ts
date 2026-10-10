@@ -6,6 +6,7 @@ import type { PreparedScene } from '../scene/scene';
 import { MATERIAL_BYTES, MPM_WGSL, PARAMS_BYTES } from './kernels';
 import {
   BYTES_PER_GRID_NODE,
+  DEFAULT_STORAGE_MODE,
   MAX_MATERIALS,
   PLANE_COUNT,
   STORAGE_MODES,
@@ -60,7 +61,7 @@ export class GpuMpm {
   private primed = false;
 
   static async create(device: GPUDevice, scene: PreparedScene, opts: { mode?: StorageMode } = {}): Promise<GpuMpm> {
-    return new GpuMpm(device, scene, await getPipelines(device), opts.mode ?? 'full');
+    return new GpuMpm(device, scene, await getPipelines(device), opts.mode ?? DEFAULT_STORAGE_MODE);
   }
 
   private constructor(

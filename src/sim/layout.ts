@@ -39,6 +39,9 @@ export const STORAGE_MODES: Record<StorageMode, { label: string; bytesPerParticl
   l2: { label: 'L2', bytesPerParticle: 7 * 4 },
 };
 
+/** По умолчанию — l2: на ПК с NVIDIA Blackwell быстрее полного на 2–30 % при побитово том же результате (M0). */
+export const DEFAULT_STORAGE_MODE: StorageMode = 'l2';
+
 /** Байт на узел сетки: три i32-атомика и скорость vec2f. */
 export const BYTES_PER_GRID_NODE = 3 * 4 + 8;
 

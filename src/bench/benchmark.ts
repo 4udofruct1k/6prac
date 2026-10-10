@@ -3,14 +3,14 @@
 
 import { benchScene } from '../scene/scenes';
 import { GpuMpm } from '../sim/GpuMpm';
-import { PLANE, type StorageMode } from '../sim/layout';
+import { DEFAULT_STORAGE_MODE, PLANE, type StorageMode } from '../sim/layout';
 import { errorText } from '../sim/gpu';
 
 export interface BenchCase {
   id: string;
   label: string;
   n: number;
-  /** Режим хранения частиц; по умолчанию full */
+  /** Режим хранения частиц; по умолчанию DEFAULT_STORAGE_MODE */
   mode?: StorageMode;
 }
 
@@ -56,7 +56,7 @@ export async function runBenchCase(device: GPUDevice, c: BenchCase, opts: BenchO
   const base: BenchResult = {
     id: c.id,
     label: c.label,
-    mode: c.mode ?? 'full',
+    mode: c.mode ?? DEFAULT_STORAGE_MODE,
     nTarget: c.n,
     n: 0,
     dxMm: 0,
