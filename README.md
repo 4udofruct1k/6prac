@@ -18,6 +18,11 @@
 
 ## Запуск
 
+Готовая сборка: **https://4udofruct1k.github.io/6prac/** — обновляется при каждом пуше в `main` и в ветку M0
+(workflow `Pages`). Нужен браузер с WebGPU.
+
+Локально:
+
 ```bash
 npm ci
 npm run dev          # http://localhost:5173 — нужен браузер с WebGPU (Chrome/Edge 113+, на Android — Chrome 121+)
