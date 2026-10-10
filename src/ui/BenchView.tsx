@@ -2,6 +2,7 @@ import { useRef, useState } from 'preact/hooks';
 import { runBenchmark, type BenchCase, type BenchResult } from '../bench/benchmark';
 import { QUALITY_PRESETS } from '../scene/presets';
 import type { GpuContext } from '../sim/gpu';
+import { STORAGE_MODES, type StorageMode } from '../sim/layout';
 
 const fmt = (v: number, digits = 1) =>
   Number.isFinite(v) ? v.toLocaleString('ru', { maximumFractionDigits: digits, minimumFractionDigits: digits }) : '—';
@@ -19,6 +20,7 @@ export function BenchView({
   const [customOn, setCustomOn] = useState(false);
   const [customN, setCustomN] = useState(200_000);
   const [seconds, setSeconds] = useState(3);
+  const [modes, setModes] = useState<Set<StorageMode>>(() => new Set<StorageMode>(['full', 'l2']));
   const [running, setRunning] = useState<string | null>(null);
   const abort = useRef<AbortController | null>(null);
 
@@ -29,13 +31,21 @@ export function BenchView({
     setSelected(next);
   };
 
+  const toggleMode = (m: StorageMode) => {
+    const next = new Set(modes);
+    if (next.has(m)) next.delete(m);
+    else next.add(m);
+    setModes(next);
+  };
+
   const start = async () => {
-    const cases: BenchCase[] = QUALITY_PRESETS.filter((p) => selected.has(p.id)).map((p) => ({
-      id: p.id,
-      label: p.label,
-      n: p.n,
-    }));
-    if (customOn) cases.push({ id: 'custom', label: 'Свои', n: Math.max(1000, Math.round(customN)) });
+    const sizes: { id: string; label: string; n: number }[] = QUALITY_PRESETS.filter((p) => selected.has(p.id)).map(
+      (p) => ({ id: p.id, label: p.label, n: p.n }),
+    );
+    if (customOn) sizes.push({ id: 'custom', label: 'Свои', n: Math.max(1000, Math.round(customN)) });
+    const cases: BenchCase[] = sizes.flatMap((c) =>
+      (['full', 'l2'] as const).filter((m) => modes.has(m)).map((mode) => ({ ...c, mode })),
+    );
     if (cases.length === 0) return;
     abort.current = new AbortController();
     const acc: BenchResult[] = [];
@@ -53,7 +63,7 @@ export function BenchView({
     <section class="bench">
       <p class="note">
         Нагрузка: сцена 120×250 мм из 2.1 целиком заполнена частицами с шагом Δx = √(A/N); стальная плита и стержень
-        1,5 км/с. Шаг сетки 2·Δx, Δt по Куранту с Δx частиц (4.3). Меряется полный шаг: P2G → сетка → G2P.
+        1,5 км/с. Шаг сетки 2·Δx, Δt по Куранту с Δx частиц (4.3). Меряется полный шаг: сетка, затем один проход по частицам (G2P этого шага + P2G следующего).
       </p>
       <div class="presets">
         {QUALITY_PRESETS.map((p) => (
@@ -73,6 +83,16 @@ export function BenchView({
             disabled={!!running}
             onInput={(e) => setCustomN(Number(e.currentTarget.value))}
           />
+        </label>
+      </div>
+      <div class="presets">
+        <label class="check">
+          <input type="checkbox" checked={modes.has('full')} onChange={() => toggleMode('full')} disabled={!!running} />
+          Режим «Полный» <span class="dim">(шаг пишет все 16 полей частицы, 64 Б)</span>
+        </label>
+        <label class="check">
+          <input type="checkbox" checked={modes.has('l2')} onChange={() => toggleMode('l2')} disabled={!!running} />
+          Режим «L2» <span class="dim">(шаг трогает 7 полей, 28 Б; результат тот же побитово)</span>
         </label>
       </div>
       <div class="controls">
@@ -98,7 +118,9 @@ export function BenchView({
             <thead>
               <tr>
                 <th>Пресет</th>
+                <th>Режим</th>
                 <th>N</th>
+                <th>Рабочий набор, МБ</th>
                 <th>Δx, мм</th>
                 <th>Δt, нс</th>
                 <th>мс/шаг</th>
@@ -113,7 +135,9 @@ export function BenchView({
               {results.map((r) => (
                 <tr>
                   <td>{r.label}</td>
+                  <td>{STORAGE_MODES[r.mode].label}</td>
                   <td>{r.n.toLocaleString('ru')}</td>
+                  <td>{fmt(r.workingSetMB, 1)}</td>
                   <td>{fmt(r.dxMm, 2)}</td>
                   <td>{fmt(r.dtNs, 1)}</td>
                   <td>{fmt(r.msPerStep, 2)}</td>

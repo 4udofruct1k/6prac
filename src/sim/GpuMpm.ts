@@ -1,14 +1,23 @@
 // Хост-часть ядра MPM на WebGPU: буферы, конвейеры, шаги, чтение снимков.
 // Ядро не знает об интерфейсе (13): на входе подготовленная сцена, на выходе буфер частиц.
+// Шаг = gridUpdate + g2p2g (см. kernels.ts); перед первым шагом — отдельный p2g.
 
 import type { PreparedScene } from '../scene/scene';
-import { MPM_WGSL, PARAMS_BYTES } from './kernels';
-import { MAX_MATERIALS, PLANE_COUNT, VizMode, WORKGROUP_SIZE } from './layout';
+import { MATERIAL_BYTES, MPM_WGSL, PARAMS_BYTES } from './kernels';
+import {
+  BYTES_PER_GRID_NODE,
+  MAX_MATERIALS,
+  PLANE_COUNT,
+  STORAGE_MODES,
+  VizMode,
+  WORKGROUP_SIZE,
+  type StorageMode,
+} from './layout';
 
 interface Pipelines {
   p2g: GPUComputePipeline;
   grid: GPUComputePipeline;
-  g2p: GPUComputePipeline;
+  g2p2g: GPUComputePipeline;
 }
 
 const pipelineCache = new WeakMap<GPUDevice, Promise<Pipelines>>();
@@ -19,7 +28,11 @@ function getPipelines(device: GPUDevice): Promise<Pipelines> {
     const module = device.createShaderModule({ label: 'mpm', code: MPM_WGSL });
     const make = (entryPoint: string) =>
       device.createComputePipelineAsync({ label: entryPoint, layout: 'auto', compute: { module, entryPoint } });
-    p = Promise.all([make('p2g'), make('gridUpdate'), make('g2p')]).then(([p2g, grid, g2p]) => ({ p2g, grid, g2p }));
+    p = Promise.all([make('p2g'), make('gridUpdate'), make('g2p2g')]).then(([p2g, grid, g2p2g]) => ({
+      p2g,
+      grid,
+      g2p2g,
+    }));
     pipelineCache.set(device, p);
   }
   return p;
@@ -31,23 +44,30 @@ export class GpuMpm {
   readonly particleBuffer: GPUBuffer;
   stepCount = 0;
 
+  /** Параметры шага; в режиме l2 g2p2g с ними не пишет v, C и VIZ */
   private readonly params: GPUBuffer;
+  /** Те же параметры с записью v, C и VIZ — для последнего шага перед кадром или чтением */
+  private readonly paramsAux: GPUBuffer;
   private readonly grid: GPUBuffer;
   private readonly gridV: GPUBuffer;
   private readonly status: GPUBuffer;
   private readonly bgP2g: GPUBindGroup;
   private readonly bgGrid: GPUBindGroup;
-  private readonly bgG2p: GPUBindGroup;
+  private readonly bgStep: GPUBindGroup;
+  private readonly bgStepAux: GPUBindGroup;
   private vizMode: VizMode = VizMode.Speed;
+  /** Первый P2G уже записан */
+  private primed = false;
 
-  static async create(device: GPUDevice, scene: PreparedScene): Promise<GpuMpm> {
-    return new GpuMpm(device, scene, await getPipelines(device));
+  static async create(device: GPUDevice, scene: PreparedScene, opts: { mode?: StorageMode } = {}): Promise<GpuMpm> {
+    return new GpuMpm(device, scene, await getPipelines(device), opts.mode ?? 'full');
   }
 
   private constructor(
     readonly device: GPUDevice,
     readonly scene: PreparedScene,
     private readonly pipes: Pipelines,
+    readonly mode: StorageMode,
   ) {
     const { n, gx, gy } = scene;
     this.n = n;
@@ -66,11 +86,10 @@ export class GpuMpm {
       throw new Error(`Слишком много частиц для одномерного dispatch: ${n}`);
     }
 
-    this.params = device.createBuffer({
-      label: 'params',
-      size: PARAMS_BYTES,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+    const uniform = (label: string) =>
+      device.createBuffer({ label, size: PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.params = uniform('params');
+    this.paramsAux = uniform('params-aux');
     this.particleBuffer = device.createBuffer({
       label: 'particles',
       size: particleBytes,
@@ -106,14 +125,23 @@ export class GpuMpm {
         [4, this.status],
       ]),
     });
-    this.bgG2p = device.createBindGroup({
-      layout: pipes.g2p.getBindGroupLayout(0),
-      entries: entries([
-        [0, this.params],
-        [1, this.particleBuffer],
-        [3, this.gridV],
-      ]),
-    });
+    const stepGroup = (params: GPUBuffer) =>
+      device.createBindGroup({
+        layout: pipes.g2p2g.getBindGroupLayout(0),
+        entries: entries([
+          [0, params],
+          [1, this.particleBuffer],
+          [2, this.grid],
+          [3, this.gridV],
+        ]),
+      });
+    this.bgStep = stepGroup(this.params);
+    this.bgStepAux = stepGroup(this.paramsAux);
+  }
+
+  /** Байт, которые шаг трогает в памяти: поля частиц по режиму + сетка. Сравнивать с кэшем L2. */
+  get workingSetBytes(): number {
+    return STORAGE_MODES[this.mode].bytesPerParticle * this.n + BYTES_PER_GRID_NODE * this.gridNodes;
   }
 
   get dt(): number {
@@ -132,6 +160,11 @@ export class GpuMpm {
   }
 
   private writeParams(): void {
+    this.device.queue.writeBuffer(this.params, 0, this.packParams(this.mode === 'full'));
+    this.device.queue.writeBuffer(this.paramsAux, 0, this.packParams(true));
+  }
+
+  private packParams(storeAux: boolean): ArrayBuffer {
     const s = this.scene;
     const buf = new ArrayBuffer(PARAMS_BYTES);
     const u = new Uint32Array(buf);
@@ -148,37 +181,48 @@ export class GpuMpm {
     f[9] = s.momScale;
     u[10] = s.boundaryNodes;
     u[11] = this.vizMode;
+    u[12] = storeAux ? 1 : 0;
+    // Режим l2: масса = ρ·Δx², объём = Δx² — теми же выражениями, что в prepareScene (один Δx на сцену),
+    // поэтому после округления до f32 значения побитово равны плоскостям MASS и VOL0
+    u[13] = this.mode === 'l2' ? 1 : 0;
+    f[14] = s.dx * s.dx;
     for (let m = 0; m < Math.min(s.materials.length, MAX_MATERIALS); m++) {
       const mat = s.materials[m];
-      f.set([mat.lambda, mat.mu, mat.rho, mat.c], 16 + m * 4);
+      f.set([mat.lambda, mat.mu, mat.rho, mat.c, mat.rho * s.dx * s.dx], 16 + (m * MATERIAL_BYTES) / 4);
     }
-    this.device.queue.writeBuffer(this.params, 0, buf);
+    return buf;
   }
 
-  /** Записывает `count` шагов в один compute-проход. */
-  encodeSteps(encoder: GPUCommandEncoder, count: number): void {
+  /**
+   * Записывает `count` шагов в один compute-проход.
+   * `aux` — последний шаг пишет v, C и VIZ (нужно перед кадром и чтением v); в режиме full пишут все шаги.
+   */
+  encodeSteps(encoder: GPUCommandEncoder, count: number, aux = true): void {
     if (count <= 0) return;
     const pass = encoder.beginComputePass({ label: 'mpm-steps' });
     const pg = Math.ceil(this.n / WORKGROUP_SIZE);
     const gg = Math.ceil(this.gridNodes / WORKGROUP_SIZE);
-    for (let k = 0; k < count; k++) {
+    if (!this.primed) {
       pass.setPipeline(this.pipes.p2g);
       pass.setBindGroup(0, this.bgP2g);
       pass.dispatchWorkgroups(pg);
+      this.primed = true;
+    }
+    for (let k = 0; k < count; k++) {
       pass.setPipeline(this.pipes.grid);
       pass.setBindGroup(0, this.bgGrid);
       pass.dispatchWorkgroups(gg);
-      pass.setPipeline(this.pipes.g2p);
-      pass.setBindGroup(0, this.bgG2p);
+      pass.setPipeline(this.pipes.g2p2g);
+      pass.setBindGroup(0, aux && k === count - 1 ? this.bgStepAux : this.bgStep);
       pass.dispatchWorkgroups(pg);
     }
     pass.end();
     this.stepCount += count;
   }
 
-  step(count: number): void {
+  step(count: number, aux = true): void {
     const encoder = this.device.createCommandEncoder();
-    this.encodeSteps(encoder, count);
+    this.encodeSteps(encoder, count, aux);
     this.device.queue.submit([encoder.finish()]);
   }
 
@@ -204,7 +248,7 @@ export class GpuMpm {
   }
 
   destroy(): void {
-    for (const b of [this.params, this.particleBuffer, this.grid, this.gridV, this.status]) b.destroy();
+    for (const b of [this.params, this.paramsAux, this.particleBuffer, this.grid, this.gridV, this.status]) b.destroy();
   }
 }
 

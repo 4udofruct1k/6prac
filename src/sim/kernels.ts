@@ -1,5 +1,9 @@
-// WGSL-ядра явного 2D MLS-MPM (раздел 4): P2G → сетка → G2P + материал + перенос.
-// M0: неогуковская упругость (плоская деформация). EOS, Джонсон–Кук, разрушение — M1.
+// WGSL-ядра явного 2D MLS-MPM (раздел 4). M0: неогуковская упругость (плоская деформация).
+// EOS, Джонсон–Кук, разрушение — M1.
+//
+// Шаг слит в два прохода: gridUpdate (импульс → скорость, стенки) и g2p2g — G2P этого шага,
+// материал, перенос и сразу P2G следующего. Частица читается и пишется один раз за шаг.
+// Первый P2G делает отдельное ядро p2g. Последовательность операций та же, что у CPU-эталона.
 //
 // Детерминизм (4.6): P2G копит массу и импульс в i32 с фиксированной точкой. Целочисленная
 // сумма не зависит от порядка атомиков, поэтому повторный прогон совпадает побитово.
@@ -9,8 +13,11 @@
 
 import { FIXED_POINT_GUARD, MAX_MATERIALS, PLANE, VizMode, WORKGROUP_SIZE } from './layout';
 
-/** Размер uniform-структуры Params в байтах (должен совпадать с writeParams в GpuMpm). */
-export const PARAMS_BYTES = 64 + MAX_MATERIALS * 16;
+/** Material в uniform: 8 × f32 */
+export const MATERIAL_BYTES = 32;
+
+/** Размер uniform-структуры Params в байтах (должен совпадать с packParams в GpuMpm). */
+export const PARAMS_BYTES = 64 + MAX_MATERIALS * MATERIAL_BYTES;
 
 const planeConsts = Object.entries(PLANE)
   .map(([k, v]) => `const P_${k}: u32 = ${v}u;`)
@@ -22,6 +29,11 @@ struct Material {
   mu: f32,
   rho: f32,
   c: f32,
+  // Масса частицы ρ·Δx², посчитанная на CPU так же, как при засеве (режим l2)
+  pmass: f32,
+  _p0: f32,
+  _p1: f32,
+  _p2: f32,
 }
 
 struct Params {
@@ -37,10 +49,13 @@ struct Params {
   momScale: f32,
   bound: u32,
   vizMode: u32,
-  _pad0: u32,
-  _pad1: u32,
-  _pad2: u32,
-  _pad3: u32,
+  // 1 — g2p2g пишет v, C и VIZ; 0 — только x и F (режим L2 между кадрами)
+  storeAux: u32,
+  // 1 — масса и объём частицы из материала и Δx сцены, плоскости MASS и VOL0 не читаются.
+  // Значения побитово равны засеянным в плоскости, поэтому режимы дают одинаковый результат.
+  compact: u32,
+  vol0: f32,
+  _pad: u32,
   mats: array<Material, ${MAX_MATERIALS}>,
 }
 
@@ -85,41 +100,31 @@ fn stencil(x: vec2f) -> Stencil {
   return Stencil(base, fx, vec3f(w0.x, w1.x, w2.x), vec3f(w0.y, w1.y, w2.y));
 }
 
-@compute @workgroup_size(${WORKGROUP_SIZE})
-fn p2g(@builtin(global_invocation_id) gid: vec3u) {
-  let i = gid.x;
-  if (i >= P.n) {
-    return;
-  }
-  let x = vec2f(ld(P_X, i), ld(P_Y, i));
-  let v = vec2f(ld(P_VX, i), ld(P_VY, i));
-  let c00 = ld(P_C00, i);
-  let c01 = ld(P_C01, i);
-  let c10 = ld(P_C10, i);
-  let c11 = ld(P_C11, i);
-  let f00 = ld(P_F00, i);
-  let f01 = ld(P_F01, i);
-  let f10 = ld(P_F10, i);
-  let f11 = ld(P_F11, i);
-  let m = ld(P_MASS, i);
-  let vol0 = ld(P_VOL0, i);
+// P2G одной частицы. c = (C00, C01, C10, C11), f = (F00, F01, F10, F11).
+fn scatter(i: u32, x: vec2f, v: vec2f, c: vec4f, f: vec4f) {
   let mat = material(i);
+  var m = mat.pmass;
+  var vol0 = P.vol0;
+  if (P.compact == 0u) {
+    m = ld(P_MASS, i);
+    vol0 = ld(P_VOL0, i);
+  }
 
   // Напряжение Кирхгофа неогуковой модели: tau = mu (F F^T - I) + lambda ln J I
-  let lnJ = log(max(f00 * f11 - f01 * f10, 1e-6));
-  let b00 = f00 * f00 + f01 * f01;
-  let b01 = f00 * f10 + f01 * f11;
-  let b11 = f10 * f10 + f11 * f11;
+  let lnJ = log(max(f.x * f.w - f.y * f.z, 1e-6));
+  let b00 = f.x * f.x + f.y * f.y;
+  let b01 = f.x * f.z + f.y * f.w;
+  let b11 = f.z * f.z + f.w * f.w;
   let t00 = mat.mu * (b00 - 1.0) + mat.lambda * lnJ;
   let t01 = mat.mu * b01;
   let t11 = mat.mu * (b11 - 1.0) + mat.lambda * lnJ;
 
   // MLS-MPM: аффинный импульс = -dt V0 (4/h^2) tau + m C
   let k = -P.dt * vol0 * 4.0 * P.invH * P.invH;
-  let a00 = k * t00 + m * c00;
-  let a01 = k * t01 + m * c01;
-  let a10 = k * t01 + m * c10;
-  let a11 = k * t11 + m * c11;
+  let a00 = k * t00 + m * c.x;
+  let a01 = k * t01 + m * c.y;
+  let a10 = k * t01 + m * c.z;
+  let a11 = k * t11 + m * c.w;
 
   let s = stencil(x);
   for (var b = 0; b < 3; b++) {
@@ -136,8 +141,24 @@ fn p2g(@builtin(global_invocation_id) gid: vec3u) {
   }
 }
 
+// Первый P2G из начального состояния частиц.
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn p2g(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x;
+  if (i >= P.n) {
+    return;
+  }
+  scatter(
+    i,
+    vec2f(ld(P_X, i), ld(P_Y, i)),
+    vec2f(ld(P_VX, i), ld(P_VY, i)),
+    vec4f(ld(P_C00, i), ld(P_C01, i), ld(P_C10, i), ld(P_C11, i)),
+    vec4f(ld(P_F00, i), ld(P_F01, i), ld(P_F10, i), ld(P_F11, i)),
+  );
+}
+
 // Импульс → скорость, гравитация, стенки (скольжение, отрыв разрешён).
-// Атомики обнуляются здесь же — отдельный проход очистки не нужен.
+// Атомики обнуляются здесь же — следующий P2G копит с нуля без отдельного прохода очистки.
 @compute @workgroup_size(${WORKGROUP_SIZE})
 fn gridUpdate(@builtin(global_invocation_id) gid: vec3u) {
   let id = gid.x;
@@ -165,8 +186,9 @@ fn gridUpdate(@builtin(global_invocation_id) gid: vec3u) {
   gridV[id] = v;
 }
 
+// G2P этого шага + материал + перенос, затем P2G следующего шага.
 @compute @workgroup_size(${WORKGROUP_SIZE})
-fn g2p(@builtin(global_invocation_id) gid: vec3u) {
+fn g2p2g(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;
   if (i >= P.n) {
     return;
@@ -192,37 +214,43 @@ fn g2p(@builtin(global_invocation_id) gid: vec3u) {
   let f01 = ld(P_F01, i);
   let f10 = ld(P_F10, i);
   let f11 = ld(P_F11, i);
-  let n00 = (1.0 + dt * c.x) * f00 + dt * c.y * f10;
-  let n01 = (1.0 + dt * c.x) * f01 + dt * c.y * f11;
-  let n10 = dt * c.z * f00 + (1.0 + dt * c.w) * f10;
-  let n11 = dt * c.z * f01 + (1.0 + dt * c.w) * f11;
+  let nf = vec4f(
+    (1.0 + dt * c.x) * f00 + dt * c.y * f10,
+    (1.0 + dt * c.x) * f01 + dt * c.y * f11,
+    dt * c.z * f00 + (1.0 + dt * c.w) * f10,
+    dt * c.z * f01 + (1.0 + dt * c.w) * f11,
+  );
 
   // Страховка: частица не покидает зону, где её шаблон 3×3 целиком в сетке
   x = clamp(x + dt * nv, vec2f(P.h), vec2f(f32(P.gx - 2u), f32(P.gy - 2u)) * P.h);
 
   st(P_X, i, x.x);
   st(P_Y, i, x.y);
-  st(P_VX, i, nv.x);
-  st(P_VY, i, nv.y);
-  st(P_C00, i, c.x);
-  st(P_C01, i, c.y);
-  st(P_C10, i, c.z);
-  st(P_C11, i, c.w);
-  st(P_F00, i, n00);
-  st(P_F01, i, n01);
-  st(P_F10, i, n10);
-  st(P_F11, i, n11);
+  st(P_F00, i, nf.x);
+  st(P_F01, i, nf.y);
+  st(P_F10, i, nf.z);
+  st(P_F11, i, nf.w);
 
-  var viz = 0.0;
-  if (P.vizMode == VIZ_SPEED) {
-    viz = length(nv);
-  } else if (P.vizMode == VIZ_PRESSURE) {
-    // p = -tr(sigma)/3 с учётом tau_zz = lambda ln J при плоской деформации, ГПа
-    let mat = material(i);
-    let J = max(n00 * n11 - n01 * n10, 1e-6);
-    let trB = n00 * n00 + n01 * n01 + n10 * n10 + n11 * n11;
-    viz = -(mat.mu * (trB - 2.0) + 3.0 * mat.lambda * log(J)) / (3.0 * J);
+  if (P.storeAux != 0u) {
+    st(P_VX, i, nv.x);
+    st(P_VY, i, nv.y);
+    st(P_C00, i, c.x);
+    st(P_C01, i, c.y);
+    st(P_C10, i, c.z);
+    st(P_C11, i, c.w);
+    var viz = 0.0;
+    if (P.vizMode == VIZ_SPEED) {
+      viz = length(nv);
+    } else if (P.vizMode == VIZ_PRESSURE) {
+      // p = -tr(sigma)/3 с учётом tau_zz = lambda ln J при плоской деформации, ГПа
+      let mat = material(i);
+      let J = max(nf.x * nf.w - nf.y * nf.z, 1e-6);
+      let trB = dot(nf, nf);
+      viz = -(mat.mu * (trB - 2.0) + 3.0 * mat.lambda * log(J)) / (3.0 * J);
+    }
+    st(P_VIZ, i, viz);
   }
-  st(P_VIZ, i, viz);
+
+  scatter(i, x, nv, c, nf);
 }
 `;

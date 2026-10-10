@@ -118,6 +118,7 @@ export function prepareScene(spec: SceneSpec): PreparedScene {
   spec.bodies.forEach((b, bi) => {
     const { nx, ny } = counts[bi];
     const mi = materialIndex.get(b.material.id)!;
+    // То же выражение GpuMpm.packParams передаёт в режим l2 — не меняй одно без другого
     const mass = b.material.density * dx * dx;
     maxMass = Math.max(maxMass, mass);
     const omega = b.omega ?? 0;

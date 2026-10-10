@@ -26,6 +26,22 @@ export const PLANE = {
 
 export const PLANE_COUNT = 16;
 
+/**
+ * Как ядро хранит частицы между шагами.
+ * full — каждый шаг пишет все поля; l2 — шаг трогает только x, F и метку (7 плоскостей из 16),
+ * v, C и VIZ пишутся на шаге перед кадром или чтением, масса и объём берутся из материала и Δx.
+ * Цель l2 — уложить рабочий набор частиц в кэш L2 видеокарты.
+ */
+export type StorageMode = 'full' | 'l2';
+
+export const STORAGE_MODES: Record<StorageMode, { label: string; bytesPerParticle: number }> = {
+  full: { label: 'Полный', bytesPerParticle: PLANE_COUNT * 4 },
+  l2: { label: 'L2', bytesPerParticle: 7 * 4 },
+};
+
+/** Байт на узел сетки: три i32-атомика и скорость vec2f. */
+export const BYTES_PER_GRID_NODE = 3 * 4 + 8;
+
 export const MAX_MATERIALS = 8;
 
 export const WORKGROUP_SIZE = 64;

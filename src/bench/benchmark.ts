@@ -3,22 +3,27 @@
 
 import { benchScene } from '../scene/scenes';
 import { GpuMpm } from '../sim/GpuMpm';
-import { PLANE } from '../sim/layout';
+import { PLANE, type StorageMode } from '../sim/layout';
 import { errorText } from '../sim/gpu';
 
 export interface BenchCase {
   id: string;
   label: string;
   n: number;
+  /** Режим хранения частиц; по умолчанию full */
+  mode?: StorageMode;
 }
 
 export interface BenchResult {
   id: string;
   label: string;
+  mode: StorageMode;
   nTarget: number;
   n: number;
   dxMm: number;
   gridNodes: number;
+  /** Данные, которые шаг трогает в памяти (частицы по режиму + сетка), МБ — сравнивать с кэшем L2 */
+  workingSetMB: number;
   dtNs: number;
   steps: number;
   seconds: number;
@@ -51,10 +56,12 @@ export async function runBenchCase(device: GPUDevice, c: BenchCase, opts: BenchO
   const base: BenchResult = {
     id: c.id,
     label: c.label,
+    mode: c.mode ?? 'full',
     nTarget: c.n,
     n: 0,
     dxMm: 0,
     gridNodes: 0,
+    workingSetMB: 0,
     dtNs: 0,
     steps: 0,
     seconds: 0,
@@ -72,7 +79,8 @@ export async function runBenchCase(device: GPUDevice, c: BenchCase, opts: BenchO
     const scene = benchScene(c.n);
     Object.assign(base, { n: scene.n, dxMm: scene.dx, gridNodes: scene.gx * scene.gy, dtNs: scene.dt * 1000 });
     await yieldToUi();
-    sim = await GpuMpm.create(device, scene);
+    sim = await GpuMpm.create(device, scene, { mode: base.mode });
+    base.workingSetMB = sim.workingSetBytes / 1e6;
 
     // Прогрев: компиляция конвейеров, первые выделения памяти
     sim.step(5);
@@ -85,7 +93,8 @@ export async function runBenchCase(device: GPUDevice, c: BenchCase, opts: BenchO
     let elapsed = 0;
     while (elapsed < opts.seconds * 1000 && steps < maxSteps && !opts.signal?.aborted) {
       const n = Math.min(batch, maxSteps - steps);
-      sim.step(n);
+      // v, C и VIZ не нужны: проверка читает только x
+      sim.step(n, false);
       await device.queue.onSubmittedWorkDone();
       steps += n;
       elapsed = performance.now() - t0;

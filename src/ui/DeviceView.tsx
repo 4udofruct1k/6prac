@@ -1,5 +1,6 @@
 import { useState } from 'preact/hooks';
 import { errorText, type GpuContext, type GpuReport } from '../sim/gpu';
+import { STORAGE_MODES } from '../sim/layout';
 import { SELFTEST_TOLERANCE, runSelfTest, type SelfTestReport } from '../sim/selftest';
 
 export function DeviceView({
@@ -61,36 +62,40 @@ export function DeviceView({
       )}
       {error && <p class="error">{error}</p>}
       {selfTest && (
-        <table class="kv">
-          <tbody>
-            <tr>
-              <th>Итог</th>
-              <td class={selfTest.passed ? 'ok' : 'bad'}>{selfTest.passed ? 'пройдена' : 'не пройдена'}</td>
-            </tr>
-            <tr>
-              <th>Детерминизм (2 прогона, {selfTest.steps} шагов)</th>
-              <td class={selfTest.deterministic ? 'ok' : 'bad'}>
-                {selfTest.deterministic ? 'побитово равны' : 'различаются'}
-              </td>
-            </tr>
-            <tr>
-              <th>GPU ↔ CPU f64, положение</th>
-              <td>
-                {selfTest.maxPositionErrorCells.toExponential(2)} ячейки (допуск {SELFTEST_TOLERANCE.positionCells})
-              </td>
-            </tr>
-            <tr>
-              <th>GPU ↔ CPU f64, скорость</th>
-              <td>
-                {selfTest.maxVelocityErrorRel.toExponential(2)} от v_max (допуск {SELFTEST_TOLERANCE.velocityRel})
-              </td>
-            </tr>
-            <tr>
-              <th>Переполнение i32</th>
-              <td class={selfTest.fixedPointOverflow ? 'bad' : 'ok'}>{selfTest.fixedPointOverflow ? 'да' : 'нет'}</td>
-            </tr>
-          </tbody>
-        </table>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Режим хранения</th>
+                <th>Детерминизм</th>
+                <th>GPU ↔ CPU, положение, ячейки</th>
+                <th>GPU ↔ CPU, скорость, от v_max</th>
+                <th>Переполнение i32</th>
+                <th>Равен полному</th>
+                <th>Итог</th>
+              </tr>
+            </thead>
+            <tbody>
+              {selfTest.modes.map((m) => (
+                <tr>
+                  <td>{STORAGE_MODES[m.mode].label}</td>
+                  <td class={m.deterministic ? 'ok' : 'bad'}>{m.deterministic ? 'побитово' : 'различаются'}</td>
+                  <td>{m.maxPositionErrorCells.toExponential(2)}</td>
+                  <td>{m.maxVelocityErrorRel.toExponential(2)}</td>
+                  <td class={m.fixedPointOverflow ? 'bad' : 'ok'}>{m.fixedPointOverflow ? 'да' : 'нет'}</td>
+                  <td class={m.sameAsFull === false ? 'bad' : 'ok'}>
+                    {m.sameAsFull === undefined ? '—' : m.sameAsFull ? 'побитово' : 'нет'}
+                  </td>
+                  <td class={m.passed ? 'ok' : 'bad'}>{m.passed ? 'пройдена' : 'не пройдена'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p class="note">
+            {selfTest.steps} шагов, {selfTest.n} частиц, два прогона на режим. Допуски: положение{' '}
+            {SELFTEST_TOLERANCE.positionCells} ячейки, скорость {SELFTEST_TOLERANCE.velocityRel} от v_max.
+          </p>
+        </div>
       )}
     </section>
   );

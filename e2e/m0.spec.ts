@@ -8,7 +8,7 @@ interface ArmorApi {
   runSelfTest(device: GPUDevice, steps?: number, across?: number): Promise<SelfTestReport>;
   runBenchCase(
     device: GPUDevice,
-    c: { id: string; label: string; n: number },
+    c: { id: string; label: string; n: number; mode?: 'full' | 'l2' },
     opts: { seconds: number; maxSteps?: number },
   ): Promise<BenchResult>;
 }
@@ -39,27 +39,35 @@ for (const compat of [false, true]) {
         return { res, level: ctx.report.featureLevel, limits: ctx.report.limits };
       });
       console.log(JSON.stringify(r));
-      expect(r.res.deterministic).toBe(true);
-      expect(r.res.fixedPointOverflow).toBe(false);
+      expect(r.res.modes.map((m) => m.mode)).toEqual(['full', 'l2']);
+      for (const m of r.res.modes) {
+        expect(m.deterministic).toBe(true);
+        expect(m.fixedPointOverflow).toBe(false);
+      }
+      // Режим L2 считает то же самое, что полный, бит в бит
+      expect(r.res.modes[1].sameAsFull).toBe(true);
       expect(r.res.passed).toBe(true);
     });
   });
 }
 
-test('бенчмарк: пресет «Минимум» считает конечные числа', async ({ page }) => {
-  await openApp(page);
-  const r = await page.evaluate(async () => {
-    const ctx = await window.__armor.gpu();
-    if (!('device' in ctx)) throw new Error(ctx.reason);
-    return window.__armor.runBenchCase(ctx.device, { id: 'min', label: 'Минимум', n: 8000 }, { seconds: 1 });
+for (const mode of ['full', 'l2'] as const) {
+  test(`бенчмарк (${mode}): пресет «Минимум» считает конечные числа`, async ({ page }) => {
+    await openApp(page);
+    const r = await page.evaluate(async (mode) => {
+      const ctx = await window.__armor.gpu();
+      if (!('device' in ctx)) throw new Error(ctx.reason);
+      return window.__armor.runBenchCase(ctx.device, { id: 'min', label: 'Минимум', n: 8000, mode }, { seconds: 1 });
+    }, mode);
+    console.log(JSON.stringify(r));
+    expect(r.error).toBeUndefined();
+    expect(r.mode).toBe(mode);
+    expect(r.finite).toBe(true);
+    expect(r.fixedPointOverflow).toBe(false);
+    expect(r.steps).toBeGreaterThan(0);
+    expect(Math.abs(r.n - 8000) / 8000).toBeLessThan(0.02);
   });
-  console.log(JSON.stringify(r));
-  expect(r.error).toBeUndefined();
-  expect(r.finite).toBe(true);
-  expect(r.fixedPointOverflow).toBe(false);
-  expect(r.steps).toBeGreaterThan(0);
-  expect(Math.abs(r.n - 8000) / 8000).toBeLessThan(0.02);
-});
+}
 
 for (const compat of [false, true]) {
   test(`демо${compat ? ' (compat)' : ''}: симуляция идёт без ошибок устройства`, async ({ page }) => {
