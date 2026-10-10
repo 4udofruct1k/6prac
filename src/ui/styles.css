@@ -24,7 +24,7 @@ h1 { font-size: 18px; margin: 0; letter-spacing: 0.04em; }
 .chip { font-size: 12px; padding: 3px 8px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
 .ok { color: var(--ok); }
 .bad { color: var(--bad); }
-nav { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 12px; overflow-x: auto; }
+nav { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 12px; overflow-x: auto; scrollbar-width: none; }
 nav button { background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 12px; }
 nav button.active { border-bottom-color: var(--accent); color: var(--text); }
 button, select, input {
@@ -57,3 +57,7 @@ thead th { color: var(--dim); font-weight: normal; }
 table.kv th { text-align: left; color: var(--dim); font-weight: normal; }
 table.kv td { text-align: left; white-space: normal; word-break: break-word; }
 textarea.report { width: 100%; min-height: 50vh; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font: 12px/1.4 ui-monospace, Menlo, monospace; padding: 8px; }
+.gate select { max-width: 100%; }
+.gate-summary { list-style: none; padding: 0; margin: 12px 0; display: grid; gap: 8px; max-width: 80ch; font-size: 13px; }
+.gate-summary li { display: flex; flex-wrap: wrap; column-gap: 12px; row-gap: 2px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+.gate-summary li.total { font-weight: 600; border-bottom: none; }

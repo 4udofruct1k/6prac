@@ -179,7 +179,9 @@ function summarize(cases: GateCaseResult[], determinism: DeterminismResult[], sc
     const mine = cases.filter((c) => c.test === test);
     const ok = mine.filter((c) => c.passed).length;
     const rel = mine.filter((c) => c.errorUnit === '%' && Number.isFinite(c.error));
-    const worst = rel.length ? `; худшее отклонение ${fmt(Math.max(...rel.map((c) => Math.abs(c.error))))} %` : '';
+    const worst = rel.length
+      ? `; худшее отклонение ${fmt(Math.max(...rel.map((c) => Math.abs(c.error))))} % при допуске ${fmt(rel[0].tolerance, 0)} %`
+      : '';
     return {
       test,
       title,

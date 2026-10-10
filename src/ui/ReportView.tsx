@@ -1,6 +1,6 @@
 import { useState } from 'preact/hooks';
 
-/** JSON-отчёт M0: устройство, самопроверка, бенчмарк — чтобы перенести числа с телефона в спеку. */
+/** JSON-отчёт: устройство, самопроверка, гейт M1, бенчмарк — чтобы перенести числа с устройства в документы. */
 export function ReportView({ report }: { report: unknown }) {
   const text = JSON.stringify(report, null, 2);
   const [copied, setCopied] = useState<string | null>(null);
@@ -20,8 +20,8 @@ export function ReportView({ report }: { report: unknown }) {
   return (
     <section class="report">
       <p class="note">
-        Запустите «Самопроверку» на вкладке «Устройство» и бенчмарк, затем скопируйте отчёт — по нему фиксируются числа
-        пресетов (гейт M0).
+        Запустите гейт на вкладке «Валидация» (и при желании «Самопроверку» на вкладке «Устройство» и бенчмарк), затем
+        скопируйте отчёт — по нему сверяется гейт M1 на этом устройстве.
       </p>
       <div class="controls">
         <button class="primary" onClick={copy}>

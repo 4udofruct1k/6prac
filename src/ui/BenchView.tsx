@@ -2,7 +2,7 @@ import { useRef, useState } from 'preact/hooks';
 import { runBenchmark, type BenchCase, type BenchResult } from '../bench/benchmark';
 import { QUALITY_PRESETS } from '../scene/presets';
 import type { GpuContext } from '../sim/gpu';
-import { STORAGE_MODES, type StorageMode } from '../sim/layout';
+import { HOT_PLANES, PLANE_COUNT, STORAGE_MODES, type StorageMode } from '../sim/layout';
 
 const fmt = (v: number, digits = 1) =>
   Number.isFinite(v) ? v.toLocaleString('ru', { maximumFractionDigits: digits, minimumFractionDigits: digits }) : '—';
@@ -88,11 +88,17 @@ export function BenchView({
       <div class="presets">
         <label class="check">
           <input type="checkbox" checked={modes.has('full')} onChange={() => toggleMode('full')} disabled={!!running} />
-          Режим «Полный» <span class="dim">(шаг пишет все 16 полей частицы, 64 Б)</span>
+          Режим «Полный»{' '}
+          <span class="dim">
+            (шаг пишет все {PLANE_COUNT} полей частицы, {STORAGE_MODES.full.bytesPerParticle} Б)
+          </span>
         </label>
         <label class="check">
           <input type="checkbox" checked={modes.has('l2')} onChange={() => toggleMode('l2')} disabled={!!running} />
-          Режим «L2» <span class="dim">(шаг трогает 7 полей, 28 Б; результат тот же побитово)</span>
+          Режим «L2»{' '}
+          <span class="dim">
+            (шаг трогает {HOT_PLANES.length} полей, {STORAGE_MODES.l2.bytesPerParticle} Б; результат тот же побитово)
+          </span>
         </label>
       </div>
       <div class="controls">

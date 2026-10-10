@@ -25,3 +25,17 @@ test('гейт M1 на GPU: ПК-Высокий', async ({ page }) => {
   expect(r.engine).toBe('gpu');
   expect(r.passed).toBe(true);
 });
+
+// Вкладка «Валидация»: тот же гейт из интерфейса, пресет «Телефон» (мало частиц, удвоенный допуск)
+test('вкладка «Валидация»: гейт в пресете «Телефон» проходит', async ({ page }) => {
+  test.setTimeout(600_000);
+  const errors = await openApp(page, '?tab=gate');
+  await page.locator('section.gate select').selectOption('phone');
+  await page.getByRole('button', { name: 'Запустить гейт' }).click();
+  const verdict = page.locator('.gate-summary li.total span').last();
+  await expect(verdict).toBeVisible({ timeout: 540_000 });
+  console.log(await page.locator('.gate-summary').innerText());
+  await expect(verdict).toHaveClass(/ok/);
+  await expect(page.locator('.error')).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
