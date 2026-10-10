@@ -1,14 +1,14 @@
-// Самопроверка ядра на устройстве: детерминизм (12.10) и совпадение GPU с CPU-эталоном
-// в каждом режиме хранения частиц. Полный гейт M1 — относительный допуск 1e-4 на малых сценах;
-// в M0 смотрим порядок расхождения.
+// Самопроверка ядра на устройстве: детерминизм (12.10), совпадение GPU с CPU-эталоном (13: на малых сценах
+// относительный допуск 1e-4) и побитовое равенство режимов хранения частиц.
 
 import { CpuMpm } from '../cpu-ref/CpuMpm';
-import { demoScene } from '../scene/scenes';
-import type { PreparedScene } from '../scene/scene';
+import { taylorScene } from '../scene/demos';
+import { prepareScene, type PreparedScene } from '../scene/scene';
 import { GpuMpm } from './GpuMpm';
-import { PLANE, type StorageMode } from './layout';
+import { Bc, PLANE, type StorageMode } from './layout';
 
-export interface SelfTestModeResult {
+export interface SelfTestCase {
+  scene: string;
   mode: StorageMode;
   /** Два GPU-прогона одного сценария совпали побитово */
   deterministic: boolean;
@@ -17,59 +17,77 @@ export interface SelfTestModeResult {
   /** То же для скорости, относительно максимальной скорости в сцене */
   maxVelocityErrorRel: number;
   fixedPointOverflow: boolean;
-  /** Режим l2: результат побитово равен полному режиму (качество счёта то же) */
+  /** Режим l2: результат побитово равен полному режиму */
   sameAsFull?: boolean;
   passed: boolean;
 }
 
 export interface SelfTestReport {
   steps: number;
-  n: number;
-  modes: SelfTestModeResult[];
+  cases: SelfTestCase[];
   passed: boolean;
 }
 
-/**
- * Допуски самопроверки M0. На SwiftShader наблюдается 4,5e-5 ячейки и 2,8e-6 от v_max,
- * на телефоне (Mali) — 9,2e-5 и 1,5e-5; запас на FMA и пониженную точность log() мобильных GPU.
- */
+/** Допуски самопроверки: положение и скорость (13 — относительный 1e-4 на малых сценах). */
 export const SELFTEST_TOLERANCE = { positionCells: 1e-3, velocityRel: 1e-3 };
 
 const MODES: StorageMode[] = ['full', 'l2'];
 
-export async function runSelfTest(device: GPUDevice, steps = 300, across = 16): Promise<SelfTestReport> {
-  const scene = demoScene({ across });
-  const cpu = new CpuMpm(scene);
-  cpu.step(steps);
-  const modes: SelfTestModeResult[] = [];
-  let fullData: Float32Array | undefined;
-  for (const mode of MODES) {
-    const { result, data } = await checkMode(device, scene, cpu, steps, mode);
-    if (mode === 'full') fullData = data;
-    else if (fullData) {
-      result.sameAsFull = bytesEqual(data, fullData);
-      result.passed &&= result.sameAsFull;
+/** Малые сцены, где работают все части ядра M1. */
+export function selfTestScenes(): { name: string; scene: PreparedScene }[] {
+  return [
+    {
+      name: 'Медный стержень → стальная плита, 500 м/с',
+      scene: prepareScene({
+        mode: 'plane',
+        domain: { xmin: 0, xmax: 24, ymin: 0, ymax: 22 },
+        dx: 0.5,
+        bodies: [
+          { rect: { x0: 2, y0: 2, x1: 22, y1: 8 }, material: 'steel_4340', velocity: [0, 0], bodyId: 0, field: 0 },
+          { rect: { x0: 10, y0: 8.5, x1: 14, y1: 20 }, material: 'copper_ofhc', velocity: [0, -0.5], bodyId: 1, field: 1 },
+        ],
+        bc: { left: Bc.Open, right: Bc.Open, bottom: Bc.Open, top: Bc.Open },
+      }),
+    },
+    { name: 'Цилиндр Тейлора, медь 190 м/с, осесимм.', scene: taylorScene('copper_ofhc', 0.19, 25.4, 0.635) },
+  ];
+}
+
+export async function runSelfTest(device: GPUDevice, steps = 200): Promise<SelfTestReport> {
+  const cases: SelfTestCase[] = [];
+  for (const { name, scene } of selfTestScenes()) {
+    const cpu = new CpuMpm(scene);
+    cpu.step(steps);
+    let fullData: Float32Array | undefined;
+    for (const mode of MODES) {
+      const { result, data } = await checkMode(device, name, scene, cpu, steps, mode);
+      if (mode === 'full') fullData = data;
+      else if (fullData) {
+        result.sameAsFull = bytesEqual(data, fullData);
+        result.passed &&= result.sameAsFull;
+      }
+      cases.push(result);
     }
-    modes.push(result);
   }
-  return { steps, n: scene.n, modes, passed: modes.every((m) => m.passed) };
+  return { steps, cases, passed: cases.every((c) => c.passed) };
 }
 
 async function checkMode(
   device: GPUDevice,
+  name: string,
   scene: PreparedScene,
   cpu: CpuMpm,
   steps: number,
   mode: StorageMode,
-): Promise<{ result: SelfTestModeResult; data: Float32Array }> {
+): Promise<{ result: SelfTestCase; data: Float32Array }> {
   const runGpu = async () => {
     const sim = await GpuMpm.create(device, scene, { mode });
     // Последний шаг пишет v — его сравниваем с эталоном
     sim.step(steps, true);
     const data = await sim.readParticles();
-    const status = await sim.readStatus();
+    const info = await sim.readStep();
     sim.destroy();
-    return { data, status };
+    return { data, overflow: info.overflow };
   };
   const a = await runGpu();
   const b = await runGpu();
@@ -94,10 +112,11 @@ async function checkMode(
   }
   const maxPositionErrorCells = posErr / scene.h;
   const maxVelocityErrorRel = velErr / vMax;
-  const fixedPointOverflow = (a.status | b.status) !== 0;
+  const fixedPointOverflow = a.overflow || b.overflow;
   return {
     data: a.data,
     result: {
+      scene: name,
       mode,
       deterministic,
       maxPositionErrorCells,

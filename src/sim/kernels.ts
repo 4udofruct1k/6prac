@@ -1,74 +1,99 @@
-// WGSL-ядра явного 2D MLS-MPM (раздел 4). M0: неогуковская упругость (плоская деформация).
-// EOS, Джонсон–Кук, разрушение — M1.
+// WGSL-ядра явного 2D MLS-MPM (раздел 4), веха M1: Ми–Грюнайзен, Джонсон–Кук с разрушением, откол,
+// искусственная вязкость, температура, контакт двух полей, осесимметричный режим, Δt по Куранту на GPU.
 //
-// Шаг слит в два прохода: gridUpdate (импульс → скорость, стенки) и g2p2g — G2P этого шага,
-// материал, перенос и сразу P2G следующего. Частица читается и пишется один раз за шаг.
-// Первый P2G делает отдельное ядро p2g. Последовательность операций та же, что у CPU-эталона.
+// Шаг: gridUpdate (скорости полей, контакт, границы) → g2p2g (G2P этого шага, материал, перенос и сразу
+// P2G следующего) → finalize (время, Δt следующего шага). Первый P2G делает p2g. Порядок и формулы
+// повторяют CPU-эталон (src/cpu-ref) построчно — меняешь здесь, меняй там.
 //
-// Детерминизм (4.6): P2G копит массу и импульс в i32 с фиксированной точкой. Целочисленная
-// сумма не зависит от порядка атомиков, поэтому повторный прогон совпадает побитово.
+// Энергия (12.2): кинетическая энергия, которую сетка гасит выравниванием скоростей (сведение частиц
+// в узел, контакт полей, стенки — по скоростям без толчка напряжений) и проекцией сетка → частица,
+// возвращается частицам теплом.
 //
-// Режим совместимости WebGPU: workgroup 64 (≤ 128), не больше 3 storage-буферов на ядро (≤ 4),
-// в вершинном шейдере storage-буферов нет.
+// Детерминизм (4.6): накопители P2G — i32 с фиксированной точкой, максимум скорости сигнала — atomicMax
+// по битам f32 (для положительных чисел порядок бит = порядок значений).
+//
+// Режим совместимости WebGPU: workgroup 64, не больше 4 storage-буферов на ядро, в вершинном шейдере их нет.
 
-import { FIXED_POINT_GUARD, MAX_MATERIALS, PLANE, VizMode, WORKGROUP_SIZE } from './layout';
+import {
+  Bc,
+  FIXED_POINT_GUARD,
+  GRID_ACC_PER_FIELD,
+  GRID_V_STRIDE,
+  MAX_MATERIALS,
+  PLANE,
+  STEP,
+  TAG_REMOVED,
+  VizMode,
+  WORKGROUP_SIZE,
+} from './layout';
+import { DamageModel, StrengthModel, EPS_RATE_0 } from '../materials/models';
 
-/** Material в uniform: 8 × f32 */
-export const MATERIAL_BYTES = 32;
-
+/** Material в uniform: 24 × f32 */
+export const MATERIAL_FLOATS = 24;
+export const PARAMS_HEADER_WORDS = 36;
 /** Размер uniform-структуры Params в байтах (должен совпадать с packParams в GpuMpm). */
-export const PARAMS_BYTES = 64 + MAX_MATERIALS * MATERIAL_BYTES;
+export const PARAMS_BYTES = PARAMS_HEADER_WORDS * 4 + MAX_MATERIALS * MATERIAL_FLOATS * 4;
 
-const planeConsts = Object.entries(PLANE)
-  .map(([k, v]) => `const P_${k}: u32 = ${v}u;`)
-  .join('\n');
+const consts = [
+  ...Object.entries(PLANE).map(([k, v]) => `const P_${k}: u32 = ${v}u;`),
+  ...Object.entries(STEP).map(([k, v]) => `const S_${k}: u32 = ${v}u;`),
+].join('\n');
 
 export const MPM_WGSL = /* wgsl */ `
 struct Material {
-  lambda: f32,
-  mu: f32,
-  rho: f32,
-  c: f32,
-  // Масса частицы ρ·Δx², посчитанная на CPU так же, как при засеве (режим l2)
-  pmass: f32,
-  _p0: f32,
-  _p1: f32,
-  _p2: f32,
+  rho0: f32, C0: f32, s: f32, gamma0: f32,
+  G: f32, A: f32, B: f32, n: f32,
+  C: f32, m: f32, Tm: f32, cp: f32,
+  beta: f32, D1: f32, D2: f32, D3: f32,
+  D4: f32, D5: f32, pmin: f32, strength: f32,
+  damage: f32, etaMax: f32, _p0: f32, _p1: f32,
 }
 
 struct Params {
-  n: u32,
-  gx: u32,
-  gy: u32,
-  gn: u32,
-  h: f32,
-  invH: f32,
-  dt: f32,
-  gravityY: f32,
-  massScale: f32,
-  momScale: f32,
-  bound: u32,
-  vizMode: u32,
-  // 1 — g2p2g пишет v, C и VIZ; 0 — только x и F (режим L2 между кадрами)
-  storeAux: u32,
-  // 1 — масса и объём частицы из материала и Δx сцены, плоскости MASS и VOL0 не читаются.
-  // Значения побитово равны засеянным в плоскости, поэтому режимы дают одинаковый результат.
-  compact: u32,
-  vol0: f32,
-  _pad: u32,
+  n: u32, gx: u32, gy: u32, gn: u32,
+  h: f32, invH: f32, dx: f32, cfl: f32,
+  massScale: f32, momScale: f32, gradScale: f32, kScale: f32,
+  originX: f32, originY: f32, c1: f32, c2: f32,
+  xmin: f32, xmax: f32, ymin: f32, ymax: f32,
+  friction: f32, rmin: f32, gravityY: f32, tRoom: f32,
+  vizMode: u32, storeAux: u32, axisym: u32, lockX: u32,
+  bcLeft: u32, bcRight: u32, bcBottom: u32, bcTop: u32,
+  // Объём частицы в плоском режиме Δx² — тем же f32, что засеян в плоскость VOL0
+  vol0: f32, _h0: f32, _h1: f32, _h2: f32,
   mats: array<Material, ${MAX_MATERIALS}>,
 }
 
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read_write> part: array<f32>;
 @group(0) @binding(2) var<storage, read_write> grid: array<atomic<i32>>;
-@group(0) @binding(3) var<storage, read_write> gridV: array<vec2f>;
-@group(0) @binding(4) var<storage, read_write> status: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read_write> gridV: array<f32>;
+@group(0) @binding(4) var<storage, read_write> stepState: array<atomic<u32>, 8>;
 
-${planeConsts}
+${consts}
+const ACC_N: u32 = ${GRID_ACC_PER_FIELD}u;
+const A_M: u32 = 0u;
+const A_PX: u32 = 1u;
+const A_PY: u32 = 2u;
+const A_IX: u32 = 3u;
+const A_IY: u32 = 4u;
+const A_K: u32 = 5u;
+const A_GX: u32 = 6u;
+const A_GY: u32 = 7u;
+const GV_STRIDE: u32 = ${GRID_V_STRIDE}u;
+const TAG_REMOVED: u32 = ${TAG_REMOVED}u;
+const GUARD: i32 = ${FIXED_POINT_GUARD};
+const BC_WALL: u32 = ${Bc.Wall}u;
+const BC_SYM: u32 = ${Bc.Symmetry}u;
+const ST_NONE: f32 = ${StrengthModel.None}.0;
+const ST_JC: f32 = ${StrengthModel.JohnsonCook}.0;
+const DM_JC: f32 = ${DamageModel.JohnsonCook}.0;
+const EPS_RATE_0: f32 = ${EPS_RATE_0};
 const VIZ_SPEED: u32 = ${VizMode.Speed}u;
 const VIZ_PRESSURE: u32 = ${VizMode.Pressure}u;
-const GUARD: i32 = ${FIXED_POINT_GUARD};
+const VIZ_TEMPERATURE: u32 = ${VizMode.Temperature}u;
+const VIZ_EPS: u32 = ${VizMode.PlasticStrain}u;
+const VIZ_DAMAGE: u32 = ${VizMode.Damage}u;
+const VIZ_MISES: u32 = ${VizMode.VonMises}u;
 
 fn ld(plane: u32, i: u32) -> f32 {
   return part[plane * P.n + i];
@@ -78,9 +103,202 @@ fn st(plane: u32, i: u32, v: f32) {
   part[plane * P.n + i] = v;
 }
 
-fn material(i: u32) -> Material {
-  return P.mats[bitcast<u32>(ld(P_TAG, i)) & 0xffffu];
+fn tagOf(i: u32) -> u32 {
+  return bitcast<u32>(ld(P_TAG, i));
 }
+
+fn stepF(k: u32) -> f32 {
+  return bitcast<f32>(atomicLoad(&stepState[k]));
+}
+
+fn accIndex(field: u32, k: u32, node: u32) -> u32 {
+  return (field * ACC_N + k) * P.gn + node;
+}
+
+fn toFixed(v: f32, scale: f32) -> i32 {
+  return i32(round(v * scale));
+}
+
+// ---------- Модели материалов (src/materials/models.ts, src/cpu-ref/physics.ts) ----------
+
+// Ми–Грюнайзен: A(η) и A'(η)
+fn mgPart(mat: Material, eta: f32) -> vec2f {
+  let k = mat.rho0 * mat.C0 * mat.C0;
+  if (eta < 0.0) {
+    return vec2f(k * eta, k);
+  }
+  let x = min(eta, mat.etaMax);
+  let den = 1.0 - mat.s * x;
+  let a = k * x * (1.0 - 0.5 * mat.gamma0 * x) / (den * den);
+  let da = k * ((1.0 - mat.gamma0 * x) * den + 2.0 * mat.s * x * (1.0 - 0.5 * mat.gamma0 * x)) / (den * den * den);
+  return vec2f(a, da);
+}
+
+fn pressureOf(mat: Material, J: f32, e: f32, D: f32) -> f32 {
+  let p = mgPart(mat, 1.0 - J).x + mat.gamma0 * mat.rho0 * e;
+  if (D >= 1.0 && p < 0.0) {
+    return 0.0;
+  }
+  return p;
+}
+
+fn hasShear(mat: Material, D: f32, T: f32) -> bool {
+  if (mat.strength == ST_NONE || D >= 1.0) {
+    return false;
+  }
+  return !(mat.strength == ST_JC && T >= mat.Tm);
+}
+
+fn soundSpeed(mat: Material, J: f32, p: f32, shear: bool) -> f32 {
+  let da = mgPart(mat, 1.0 - J).y;
+  let k0 = mat.rho0 * mat.C0 * mat.C0;
+  let ks = max(J * (da + mat.gamma0 * max(p, 0.0)), 0.1 * k0);
+  var g = 0.0;
+  if (shear) {
+    g = mat.G;
+  }
+  return sqrt((ks + (4.0 / 3.0) * g) * J / mat.rho0);
+}
+
+fn homologousT(mat: Material, T: f32) -> f32 {
+  return clamp((T - P.tRoom) / (mat.Tm - P.tRoom), 0.0, 1.0);
+}
+
+fn jcYield(mat: Material, eps: f32, rateStar: f32, T: f32) -> f32 {
+  if (T >= mat.Tm) {
+    return 0.0;
+  }
+  var hard = mat.A;
+  if (eps > 0.0) {
+    hard += mat.B * pow(eps, mat.n);
+  }
+  let rate = 1.0 + mat.C * log(max(rateStar, 1.0));
+  let ts = homologousT(mat, T);
+  var therm = 1.0;
+  if (ts > 0.0) {
+    therm = 1.0 - pow(ts, mat.m);
+  }
+  return hard * rate * therm;
+}
+
+fn jcFractureStrain(mat: Material, triax: f32, rateStar: f32, T: f32) -> f32 {
+  let ef = (mat.D1 + mat.D2 * exp(mat.D3 * triax)) * (1.0 + mat.D4 * log(max(rateStar, 1.0)))
+    * (1.0 + mat.D5 * homologousT(mat, T));
+  return max(ef, 1e-3);
+}
+
+fn signalSpeed(c: f32, divV: f32) -> f32 {
+  let q = P.c2 * c + P.c1 * P.h * max(-divV, 0.0);
+  return q + sqrt(q * q + c * c);
+}
+
+struct MatState {
+  J: f32, sxx: f32, syy: f32, sxy: f32,
+  eps: f32, e: f32, T: f32, D: f32,
+}
+
+struct MatResult {
+  s: MatState,
+  p: f32,
+  q: f32,
+  signal: f32,
+}
+
+// Шаг материала (4.3, шаг 5): см. updateMaterial в src/cpu-ref/physics.ts
+fn updateMaterial(mat: Material, s0: MatState, c: vec4f, dzz: f32, dt: f32) -> MatResult {
+  let dxx = c.x;
+  let dyy = c.w;
+  let dxy = 0.5 * (c.y + c.z);
+  let w = 0.5 * (c.y - c.z);
+  let trD = dxx + dyy + dzz;
+
+  let Jold = s0.J;
+  let J = Jold * ((1.0 + dt * c.x) * (1.0 + dt * c.w) - dt * dt * c.y * c.z) * (1.0 + dt * dzz);
+
+  let third = trD / 3.0;
+  let exx = dxx - third;
+  let eyy = dyy - third;
+  let ezz = dzz - third;
+
+  let pOld = pressureOf(mat, Jold, s0.e, s0.D);
+  let shear = hasShear(mat, s0.D, s0.T);
+  let cOld = soundSpeed(mat, Jold, pOld, shear);
+
+  let rho = mat.rho0 / J;
+  var q = 0.0;
+  if (trD < 0.0) {
+    q = rho * P.h * (P.c1 * P.h * trD * trD - P.c2 * cOld * trD);
+  }
+
+  var sxx = 0.0;
+  var syy = 0.0;
+  var sxy = 0.0;
+  var dEps = 0.0;
+  var D = s0.D;
+  var sigmaY = 0.0;
+  if (shear) {
+    let G = mat.G;
+    sxx = s0.sxx + dt * (2.0 * G * exx + 2.0 * w * s0.sxy);
+    syy = s0.syy + dt * (2.0 * G * eyy - 2.0 * w * s0.sxy);
+    sxy = s0.sxy + dt * (2.0 * G * dxy + w * (s0.syy - s0.sxx));
+    if (mat.strength == ST_JC) {
+      let szz = -(sxx + syy);
+      let seq = sqrt(1.5 * (sxx * sxx + syy * syy + szz * szz + 2.0 * sxy * sxy));
+      let rateStar = sqrt((2.0 / 3.0) * (exx * exx + eyy * eyy + ezz * ezz + 2.0 * dxy * dxy)) / EPS_RATE_0;
+      sigmaY = jcYield(mat, s0.eps, rateStar, s0.T);
+      if (seq > sigmaY) {
+        dEps = (seq - sigmaY) / (3.0 * G);
+        var k = 0.0;
+        if (seq > 0.0) {
+          k = sigmaY / seq;
+        }
+        sxx *= k;
+        syy *= k;
+        sxy *= k;
+        if (mat.damage == DM_JC) {
+          let triax = -pOld / max(sigmaY, 1e-9);
+          D = min(D + dEps / jcFractureStrain(mat, triax, rateStar, s0.T), 1.0);
+        }
+      }
+    }
+  }
+  let szz0 = -(s0.sxx + s0.syy);
+  let szz = -(sxx + syy);
+
+  let vMid = 0.5 * (Jold + J) / mat.rho0;
+  let wDev = 0.5 * ((s0.sxx + sxx) * dxx + (s0.syy + syy) * dyy + (szz0 + szz) * dzz + 2.0 * (s0.sxy + sxy) * dxy);
+  let dv = (J - Jold) / mat.rho0;
+  let eStar = s0.e + dt * wDev * vMid - (0.5 * pOld + q) * dv;
+  let B = mat.gamma0 * mat.rho0;
+  var p = (mgPart(mat, 1.0 - J).x + B * eStar) / (1.0 + 0.5 * B * dv);
+  var e = eStar - 0.5 * p * dv;
+
+  if (p < mat.pmin) {
+    D = 1.0;
+  }
+  if (D >= 1.0) {
+    sxx = 0.0;
+    syy = 0.0;
+    sxy = 0.0;
+    if (p < 0.0) {
+      p = 0.0;
+      e = eStar;
+    }
+  }
+
+  let heat = mat.beta * sigmaY * dEps / rho + q * max(-dv, 0.0);
+  let T = s0.T + heat / mat.cp;
+
+  let cNew = soundSpeed(mat, J, p, hasShear(mat, D, T));
+  var r: MatResult;
+  r.s = MatState(J, sxx, syy, sxy, s0.eps + dEps, e, T, D);
+  r.p = p;
+  r.q = q;
+  r.signal = signalSpeed(cNew, trD);
+  return r;
+}
+
+// ---------- Перенос ----------
 
 struct Stencil {
   base: vec2i,
@@ -89,149 +307,272 @@ struct Stencil {
   wy: vec3f,
 }
 
-// Квадратичный B-сплайн: узлы base..base+2, fx — положение частицы в ячейках от base.
+// Квадратичный B-сплайн относительно начала сетки: узлы base..base+2
 fn stencil(x: vec2f) -> Stencil {
-  let xg = x * P.invH;
+  let xg = (x - vec2f(P.originX, P.originY)) * P.invH;
   let base = clamp(vec2i(floor(xg - vec2f(0.5))), vec2i(0), vec2i(i32(P.gx) - 3, i32(P.gy) - 3));
-  let fx = xg - vec2f(base);
-  let w0 = 0.5 * (1.5 - fx) * (1.5 - fx);
-  let w1 = 0.75 - (fx - 1.0) * (fx - 1.0);
-  let w2 = 0.5 * (fx - 0.5) * (fx - 0.5);
-  return Stencil(base, fx, vec3f(w0.x, w1.x, w2.x), vec3f(w0.y, w1.y, w2.y));
+  let f = xg - vec2f(base);
+  let w0 = 0.5 * (1.5 - f) * (1.5 - f);
+  let w1 = 0.75 - (f - 1.0) * (f - 1.0);
+  let w2 = 0.5 * (f - 0.5) * (f - 0.5);
+  return Stencil(base, f, vec3f(w0.x, w1.x, w2.x), vec3f(w0.y, w1.y, w2.y));
 }
 
-// P2G одной частицы. c = (C00, C01, C10, C11), f = (F00, F01, F10, F11).
-fn scatter(i: u32, x: vec2f, v: vec2f, c: vec4f, f: vec4f) {
-  let mat = material(i);
-  var m = mat.pmass;
-  var vol0 = P.vol0;
-  if (P.compact == 0u) {
-    m = ld(P_MASS, i);
-    vol0 = ld(P_VOL0, i);
+fn particleVol0(i: u32) -> f32 {
+  if (P.axisym != 0u) {
+    return ld(P_VOL0, i);
   }
+  return P.vol0;
+}
 
-  // Напряжение Кирхгофа неогуковой модели: tau = mu (F F^T - I) + lambda ln J I
-  let lnJ = log(max(f.x * f.w - f.y * f.z, 1e-6));
-  let b00 = f.x * f.x + f.y * f.y;
-  let b01 = f.x * f.z + f.y * f.w;
-  let b11 = f.z * f.z + f.w * f.w;
-  let t00 = mat.mu * (b00 - 1.0) + mat.lambda * lnJ;
-  let t01 = mat.mu * b01;
-  let t11 = mat.mu * (b11 - 1.0) + mat.lambda * lnJ;
-
-  // MLS-MPM: аффинный импульс = -dt V0 (4/h^2) tau + m C
-  let k = -P.dt * vol0 * 4.0 * P.invH * P.invH;
-  let a00 = k * t00 + m * c.x;
-  let a01 = k * t01 + m * c.y;
-  let a10 = k * t01 + m * c.z;
-  let a11 = k * t11 + m * c.w;
-
+// P2G одной частицы: масса, импульс (APIC + толчок напряжений за dt), толчок отдельно,
+// кинетическая энергия частицы в узлах, «градиент» массы
+fn scatter(i: u32, tag: u32, x: vec2f, v: vec2f, c: vec4f, sxx: f32, syy: f32, sxy: f32, pq: f32, J: f32, dt: f32) {
+  let mat = P.mats[tag & 0xffu];
+  let vol0 = particleVol0(i);
+  let m = mat.rho0 * vol0;
+  let V = vol0 * J;
+  let s00 = sxx - pq;
+  let s11 = syy - pq;
+  let s01 = sxy;
+  let k = -dt * V * 4.0 * P.invH * P.invH;
+  var hoop = 0.0;
+  if (P.axisym != 0u) {
+    let sTT = -(sxx + syy) - pq;
+    hoop = -dt * V * sTT / max(x.x, P.rmin);
+  }
+  let field = (tag >> 16u) & 1u;
   let s = stencil(x);
   for (var b = 0; b < 3; b++) {
     for (var a = 0; a < 3; a++) {
       let w = s.wx[a] * s.wy[b];
       let d = (vec2f(f32(a), f32(b)) - s.fx) * P.h;
-      let px = w * (m * v.x + a00 * d.x + a01 * d.y);
-      let py = w * (m * v.y + a10 * d.x + a11 * d.y);
+      let u = v + vec2f(c.x * d.x + c.y * d.y, c.z * d.x + c.w * d.y);
+      let imp = vec2f(k * (s00 * d.x + s01 * d.y) + hoop, k * (s01 * d.x + s11 * d.y));
       let node = u32(s.base.x + a) + u32(s.base.y + b) * P.gx;
-      atomicAdd(&grid[node], i32(round(w * m * P.massScale)));
-      atomicAdd(&grid[P.gn + node], i32(round(px * P.momScale)));
-      atomicAdd(&grid[2u * P.gn + node], i32(round(py * P.momScale)));
+      atomicAdd(&grid[accIndex(field, A_M, node)], toFixed(w * m, P.massScale));
+      atomicAdd(&grid[accIndex(field, A_PX, node)], toFixed(w * (m * u.x + imp.x), P.momScale));
+      atomicAdd(&grid[accIndex(field, A_PY, node)], toFixed(w * (m * u.y + imp.y), P.momScale));
+      atomicAdd(&grid[accIndex(field, A_IX, node)], toFixed(w * imp.x, P.momScale));
+      atomicAdd(&grid[accIndex(field, A_IY, node)], toFixed(w * imp.y, P.momScale));
+      atomicAdd(&grid[accIndex(field, A_K, node)], toFixed(0.5 * w * m * dot(u, u), P.kScale));
+      atomicAdd(&grid[accIndex(field, A_GX, node)], toFixed(w * m * d.x, P.gradScale));
+      atomicAdd(&grid[accIndex(field, A_GY, node)], toFixed(w * m * d.y, P.gradScale));
     }
   }
 }
 
-// Первый P2G из начального состояния частиц.
 @compute @workgroup_size(${WORKGROUP_SIZE})
 fn p2g(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;
   if (i >= P.n) {
     return;
   }
+  let tag = tagOf(i);
+  if ((tag & TAG_REMOVED) != 0u) {
+    return;
+  }
+  let mat = P.mats[tag & 0xffu];
+  let J = ld(P_J, i);
+  let pr = pressureOf(mat, J, ld(P_E, i), ld(P_D, i));
   scatter(
-    i,
+    i, tag,
     vec2f(ld(P_X, i), ld(P_Y, i)),
     vec2f(ld(P_VX, i), ld(P_VY, i)),
     vec4f(ld(P_C00, i), ld(P_C01, i), ld(P_C10, i), ld(P_C11, i)),
-    vec4f(ld(P_F00, i), ld(P_F01, i), ld(P_F10, i), ld(P_F11, i)),
+    ld(P_SXX, i), ld(P_SYY, i), ld(P_SXY, i), pr, J, stepF(S_DT_CUR),
   );
 }
 
-// Импульс → скорость, гравитация, стенки (скольжение, отрыв разрешён).
-// Атомики обнуляются здесь же — следующий P2G копит с нуля без отдельного прохода очистки.
+// ---------- Сетка ----------
+
+fn takeAcc(field: u32, k: u32, node: u32) -> i32 {
+  return atomicExchange(&grid[accIndex(field, k, node)], 0);
+}
+
+// Контакт полей (4.5): при сближении — убрать нормальную относительную скорость, касательную — трением
+fn contact(v: vec4f, m0: f32, m1: f32, n: vec2f) -> vec4f {
+  let mt = m0 + m1;
+  let cm = (m0 * v.xy + m1 * v.zw) / mt;
+  let dd = v.zw - cm;
+  let dn = dot(dd, n);
+  if (dn <= 0.0) {
+    return v;
+  }
+  let t = dd - dn * n;
+  let tl = length(t);
+  var kt = 0.0;
+  if (tl > 0.0) {
+    kt = min(P.friction * dn / tl, 1.0);
+  }
+  let v1 = v.zw - (dn * n + kt * t);
+  let v0 = (mt * cm - m1 * v1) / m0;
+  return vec4f(v0, v1);
+}
+
+fn bcAxis(v: f32, atMin: bool, atMax: bool, bcMin: u32, bcMax: u32) -> f32 {
+  var r = v;
+  if (atMin) {
+    if (bcMin == BC_WALL && r < 0.0) { r = 0.0; }
+    if (bcMin == BC_SYM) { r = 0.0; }
+  }
+  if (atMax) {
+    if (bcMax == BC_WALL && r > 0.0) { r = 0.0; }
+    if (bcMax == BC_SYM) { r = 0.0; }
+  }
+  return r;
+}
+
+fn applyBc(v: vec2f, xi: f32, yi: f32) -> vec2f {
+  var r = vec2f(
+    bcAxis(v.x, xi <= P.xmin, xi >= P.xmax, P.bcLeft, P.bcRight),
+    bcAxis(v.y, yi <= P.ymin, yi >= P.ymax, P.bcBottom, P.bcTop),
+  );
+  if (P.lockX != 0u) {
+    r.x = 0.0;
+  }
+  return r;
+}
+
 @compute @workgroup_size(${WORKGROUP_SIZE})
 fn gridUpdate(@builtin(global_invocation_id) gid: vec3u) {
   let id = gid.x;
   if (id >= P.gn) {
     return;
   }
-  let im = atomicExchange(&grid[id], 0);
-  let ipx = atomicExchange(&grid[P.gn + id], 0);
-  let ipy = atomicExchange(&grid[2u * P.gn + id], 0);
-  if (max(abs(im), max(abs(ipx), abs(ipy))) >= GUARD) {
-    atomicOr(&status[0], 1u);
+  var raw: array<i32, ${2 * GRID_ACC_PER_FIELD}>;
+  var big = 0;
+  for (var f = 0u; f < 2u; f++) {
+    for (var k = 0u; k < ACC_N; k++) {
+      let r = takeAcc(f, k, id);
+      raw[f * ACC_N + k] = r;
+      big = max(big, abs(r));
+    }
   }
-  var v = vec2f(0.0);
-  if (im > 0) {
-    let m = f32(im) / P.massScale;
-    v = vec2f(f32(ipx), f32(ipy)) / (P.momScale * m);
-    v.y = v.y + P.dt * P.gravityY;
-    let ix = id % P.gx;
-    let iy = id / P.gx;
-    if (ix < P.bound && v.x < 0.0) { v.x = 0.0; }
-    if (ix + P.bound >= P.gx && v.x > 0.0) { v.x = 0.0; }
-    if (iy < P.bound && v.y < 0.0) { v.y = 0.0; }
-    if (iy + P.bound >= P.gy && v.y > 0.0) { v.y = 0.0; }
+  if (big >= GUARD) {
+    atomicOr(&stepState[S_FLAGS], 1u);
   }
-  gridV[id] = v;
+  let dt = stepF(S_DT_CUR);
+  var v = vec4f(0.0);
+  var u = vec4f(0.0);
+  var m = vec2f(0.0);
+  var loss = 0.0;
+  for (var f = 0u; f < 2u; f++) {
+    let mf = f32(raw[f * ACC_N + A_M]) / P.massScale;
+    m[f] = mf;
+    if (mf <= 0.0) {
+      continue;
+    }
+    let pv = vec2f(f32(raw[f * ACC_N + A_PX]), f32(raw[f * ACC_N + A_PY])) / P.momScale;
+    let iv = vec2f(f32(raw[f * ACC_N + A_IX]), f32(raw[f * ACC_N + A_IY])) / P.momScale;
+    let uf = (pv - iv) / mf;
+    let vf = pv / mf + vec2f(0.0, dt * P.gravityY);
+    v[2u * f] = vf.x;
+    v[2u * f + 1u] = vf.y;
+    u[2u * f] = uf.x;
+    u[2u * f + 1u] = uf.y;
+    let kp = f32(raw[f * ACC_N + A_K]) / P.kScale;
+    loss += max(kp - 0.5 * mf * dot(uf, uf), 0.0);
+  }
+  if (m.x > 0.0 && m.y > 0.0) {
+    let g = vec2f(f32(raw[ACC_N + A_GX] - raw[A_GX]), f32(raw[ACC_N + A_GY] - raw[A_GY])) / P.gradScale;
+    let len = length(g);
+    if (len > 0.0) {
+      let n = g / len;
+      let k0 = 0.5 * (m.x * dot(u.xy, u.xy) + m.y * dot(u.zw, u.zw));
+      u = contact(u, m.x, m.y, n);
+      loss += max(k0 - 0.5 * (m.x * dot(u.xy, u.xy) + m.y * dot(u.zw, u.zw)), 0.0);
+      v = contact(v, m.x, m.y, n);
+    }
+  }
+  let xi = P.originX + f32(id % P.gx) * P.h;
+  let yi = P.originY + f32(id / P.gx) * P.h;
+  for (var f = 0u; f < 2u; f++) {
+    if (m[f] <= 0.0) {
+      continue;
+    }
+    let uf = vec2f(u[2u * f], u[2u * f + 1u]);
+    let ku = 0.5 * m[f] * dot(uf, uf);
+    let ub = applyBc(uf, xi, yi);
+    loss += max(ku - 0.5 * m[f] * dot(ub, ub), 0.0);
+    let vb = applyBc(vec2f(v[2u * f], v[2u * f + 1u]), xi, yi);
+    v[2u * f] = vb.x;
+    v[2u * f + 1u] = vb.y;
+  }
+  let g0 = GV_STRIDE * id;
+  gridV[g0] = v.x;
+  gridV[g0 + 1u] = v.y;
+  gridV[g0 + 2u] = v.z;
+  gridV[g0 + 3u] = v.w;
+  var lambda = 0.0;
+  if (m.x + m.y > 0.0) {
+    lambda = loss / (m.x + m.y);
+  }
+  gridV[g0 + 4u] = lambda;
 }
 
-// G2P этого шага + материал + перенос, затем P2G следующего шага.
+// ---------- Частицы: G2P + материал + перенос + P2G следующего шага ----------
+
 @compute @workgroup_size(${WORKGROUP_SIZE})
 fn g2p2g(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;
   if (i >= P.n) {
     return;
   }
-  var x = vec2f(ld(P_X, i), ld(P_Y, i));
+  var tag = tagOf(i);
+  if ((tag & TAG_REMOVED) != 0u) {
+    return;
+  }
+  let field = (tag >> 16u) & 1u;
+  let x = vec2f(ld(P_X, i), ld(P_Y, i));
   let s = stencil(x);
   var nv = vec2f(0.0);
   var c = vec4f(0.0);
+  var sumV2 = 0.0;
+  var heatGrid = 0.0;
   for (var b = 0; b < 3; b++) {
     for (var a = 0; a < 3; a++) {
       let w = s.wx[a] * s.wy[b];
       let d = (vec2f(f32(a), f32(b)) - s.fx) * P.h;
-      let gv = gridV[u32(s.base.x + a) + u32(s.base.y + b) * P.gx];
+      let g0 = GV_STRIDE * (u32(s.base.x + a) + u32(s.base.y + b) * P.gx);
+      let gv = vec2f(gridV[g0 + 2u * field], gridV[g0 + 2u * field + 1u]);
       nv += w * gv;
       c += w * vec4f(gv.x * d.x, gv.x * d.y, gv.y * d.x, gv.y * d.y);
+      sumV2 += w * dot(gv, gv);
+      heatGrid += w * gridV[g0 + 4u];
     }
   }
   c *= 4.0 * P.invH * P.invH;
 
-  // F <- (I + dt C) F
-  let dt = P.dt;
-  let f00 = ld(P_F00, i);
-  let f01 = ld(P_F01, i);
-  let f10 = ld(P_F10, i);
-  let f11 = ld(P_F11, i);
-  let nf = vec4f(
-    (1.0 + dt * c.x) * f00 + dt * c.y * f10,
-    (1.0 + dt * c.x) * f01 + dt * c.y * f11,
-    dt * c.z * f00 + (1.0 + dt * c.w) * f10,
-    dt * c.z * f01 + (1.0 + dt * c.w) * f11,
+  let mat = P.mats[tag & 0xffu];
+  let dt = stepF(S_DT_CUR);
+  var dzz = 0.0;
+  if (P.axisym != 0u) {
+    dzz = nv.x / max(x.x, P.rmin);
+  }
+  // Потеря проекции сетка → частица (APIC) + удельные потери узлов — в тепло
+  let heat = heatGrid + 0.5 * max(sumV2 - dot(nv, nv) - 0.25 * P.h * P.h * dot(c, c), 0.0);
+  let s0 = MatState(
+    ld(P_J, i), ld(P_SXX, i), ld(P_SYY, i), ld(P_SXY, i),
+    ld(P_EPS, i), ld(P_E, i) + heat, ld(P_T, i) + heat / mat.cp, ld(P_D, i),
   );
+  let r = updateMaterial(mat, s0, c, dzz, dt);
 
-  // Страховка: частица не покидает зону, где её шаблон 3×3 целиком в сетке
-  x = clamp(x + dt * nv, vec2f(P.h), vec2f(f32(P.gx - 2u), f32(P.gy - 2u)) * P.h);
+  let nx = x + dt * nv;
+  st(P_X, i, nx.x);
+  st(P_Y, i, nx.y);
+  st(P_J, i, r.s.J);
+  st(P_SXX, i, r.s.sxx);
+  st(P_SYY, i, r.s.syy);
+  st(P_SXY, i, r.s.sxy);
+  st(P_EPS, i, r.s.eps);
+  st(P_E, i, r.s.e);
+  st(P_T, i, r.s.T);
+  st(P_D, i, r.s.D);
 
-  st(P_X, i, x.x);
-  st(P_Y, i, x.y);
-  st(P_F00, i, nf.x);
-  st(P_F01, i, nf.y);
-  st(P_F10, i, nf.z);
-  st(P_F11, i, nf.w);
-
-  if (P.storeAux != 0u) {
+  let margin = 1.5 * P.h;
+  let out = nx.x < P.xmin - margin || nx.x > P.xmax + margin || nx.y < P.ymin - margin || nx.y > P.ymax + margin;
+  if (P.storeAux != 0u || out) {
     st(P_VX, i, nv.x);
     st(P_VY, i, nv.y);
     st(P_C00, i, c.x);
@@ -239,18 +580,46 @@ fn g2p2g(@builtin(global_invocation_id) gid: vec3u) {
     st(P_C10, i, c.z);
     st(P_C11, i, c.w);
     var viz = 0.0;
-    if (P.vizMode == VIZ_SPEED) {
-      viz = length(nv);
-    } else if (P.vizMode == VIZ_PRESSURE) {
-      // p = -tr(sigma)/3 с учётом tau_zz = lambda ln J при плоской деформации, ГПа
-      let mat = material(i);
-      let J = max(nf.x * nf.w - nf.y * nf.z, 1e-6);
-      let trB = dot(nf, nf);
-      viz = -(mat.mu * (trB - 2.0) + 3.0 * mat.lambda * log(J)) / (3.0 * J);
+    switch (P.vizMode) {
+      case VIZ_SPEED: { viz = length(nv); }
+      case VIZ_PRESSURE: { viz = r.p; }
+      case VIZ_TEMPERATURE: { viz = r.s.T; }
+      case VIZ_EPS: { viz = r.s.eps; }
+      case VIZ_DAMAGE: { viz = r.s.D; }
+      case VIZ_MISES: {
+        let szz = -(r.s.sxx + r.s.syy);
+        viz = sqrt(1.5 * (r.s.sxx * r.s.sxx + r.s.syy * r.s.syy + szz * szz + 2.0 * r.s.sxy * r.s.sxy));
+      }
+      default: {}
     }
     st(P_VIZ, i, viz);
   }
+  if (out) {
+    st(P_TAG, i, bitcast<f32>(tag | TAG_REMOVED));
+    atomicAdd(&stepState[S_REMOVED], 1u);
+    return;
+  }
+  atomicMax(&stepState[S_MAX_SIGNAL], bitcast<u32>(r.signal + length(nv)));
+  scatter(i, tag, nx, nv, c, r.s.sxx, r.s.syy, r.s.sxy, r.p + r.q, r.s.J, stepF(S_DT_NEXT));
+}
 
-  scatter(i, x, nv, c, nf);
+// ---------- Конец шага: время и Δt следующего шага по Куранту (4.3, шаг 7) ----------
+
+@compute @workgroup_size(1)
+fn finalize() {
+  let dtCur = stepF(S_DT_CUR);
+  // Время — сумма Кэхэна в f32
+  let y = dtCur - stepF(S_TIME_C);
+  let t0 = stepF(S_TIME);
+  let t1 = t0 + y;
+  atomicStore(&stepState[S_TIME_C], bitcast<u32>((t1 - t0) - y));
+  atomicStore(&stepState[S_TIME], bitcast<u32>(t1));
+  atomicStore(&stepState[S_DT_CUR], atomicLoad(&stepState[S_DT_NEXT]));
+  let sig = bitcast<f32>(atomicLoad(&stepState[S_MAX_SIGNAL]));
+  if (sig > 0.0) {
+    atomicStore(&stepState[S_DT_NEXT], bitcast<u32>(P.cfl * P.dx / sig));
+  }
+  atomicStore(&stepState[S_MAX_SIGNAL], 0u);
+  atomicAdd(&stepState[S_STEPS], 1u);
 }
 `;

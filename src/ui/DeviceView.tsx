@@ -66,6 +66,7 @@ export function DeviceView({
           <table>
             <thead>
               <tr>
+                <th>Сцена</th>
                 <th>Режим хранения</th>
                 <th>Детерминизм</th>
                 <th>GPU ↔ CPU, положение, ячейки</th>
@@ -76,8 +77,9 @@ export function DeviceView({
               </tr>
             </thead>
             <tbody>
-              {selfTest.modes.map((m) => (
+              {selfTest.cases.map((m) => (
                 <tr>
+                  <td>{m.scene}</td>
                   <td>{STORAGE_MODES[m.mode].label}</td>
                   <td class={m.deterministic ? 'ok' : 'bad'}>{m.deterministic ? 'побитово' : 'различаются'}</td>
                   <td>{m.maxPositionErrorCells.toExponential(2)}</td>
@@ -92,7 +94,7 @@ export function DeviceView({
             </tbody>
           </table>
           <p class="note">
-            {selfTest.steps} шагов, {selfTest.n} частиц, два прогона на режим. Допуски: положение{' '}
+            {selfTest.steps} шагов на сцену, два прогона на режим. Допуски: положение{' '}
             {SELFTEST_TOLERANCE.positionCells} ячейки, скорость {SELFTEST_TOLERANCE.velocityRel} от v_max.
           </p>
         </div>

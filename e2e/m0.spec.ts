@@ -39,13 +39,12 @@ for (const compat of [false, true]) {
         return { res, level: ctx.report.featureLevel, limits: ctx.report.limits };
       });
       console.log(JSON.stringify(r));
-      expect(r.res.modes.map((m) => m.mode)).toEqual(['full', 'l2']);
-      for (const m of r.res.modes) {
-        expect(m.deterministic).toBe(true);
-        expect(m.fixedPointOverflow).toBe(false);
+      for (const c of r.res.cases) {
+        expect(c.deterministic, c.scene).toBe(true);
+        expect(c.fixedPointOverflow, c.scene).toBe(false);
+        // Режим L2 считает то же самое, что полный, бит в бит
+        if (c.mode === 'l2') expect(c.sameAsFull, c.scene).toBe(true);
       }
-      // Режим L2 считает то же самое, что полный, бит в бит
-      expect(r.res.modes[1].sameAsFull).toBe(true);
       expect(r.res.passed).toBe(true);
     });
   });

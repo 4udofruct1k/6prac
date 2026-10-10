@@ -1,11 +1,8 @@
-// Сцены M0: демо «упругий блок отскакивает» и нагрузка для бенчмарка пресетов.
+// Сцены: демо «упругий блок отскакивает» и нагрузка для бенчмарка пресетов.
 
-import { DEMO_ELASTOMER, STEEL_4340_ELASTIC } from './materials';
+import { Bc } from '../sim/layout';
 import { REFERENCE_SCENE_MM, particleSpacing } from './presets';
 import { prepareScene, type PreparedScene, type SceneSpec } from './scene';
-
-const PPC_AXIS = 2;
-const BOUNDARY_NODES = 3;
 
 export interface DemoOptions {
   /** Частиц по стороне блока */
@@ -16,33 +13,30 @@ export const DEMO_BLOCK_MM = 40;
 export const DEMO_VELOCITY: [number, number] = [0.03, -0.06];
 export const DEMO_OMEGA = 0.0015;
 
+const WALLS = { left: Bc.Wall, right: Bc.Wall, bottom: Bc.Wall, top: Bc.Wall };
+
 /**
  * Блок эластомера 40×40 мм летит к полу на 67 м/с с вращением и отскакивает.
  * Земная гравитация за сотни мкс сдвигает блок на нанометры, поэтому «падение» задано
- * начальной скоростью. Стенки области — жёсткие, со скольжением.
+ * начальной скоростью. Стенки — по краю области, на одном месте при любом разрешении.
  */
 export function demoSceneSpec({ across }: DemoOptions): SceneSpec {
   const dx = DEMO_BLOCK_MM / across;
-  // Стенка стоит на узле (BOUNDARY_NODES − 1)·h и сдвигается с шагом сетки. Блок ставим от неё,
-  // чтобы зазор до пола (20 мм) и момент удара не зависели от разрешения.
-  const wall = (BOUNDARY_NODES - 1) * PPC_AXIS * dx;
-  const x0 = wall + 35;
-  const y0 = wall + 20;
-  const halfDiag = (DEMO_BLOCK_MM / 2) * Math.SQRT2;
-  const vMax = Math.hypot(...DEMO_VELOCITY) + DEMO_OMEGA * halfDiag;
+  const x0 = 35;
+  const y0 = 20;
   return {
-    domain: { w: 160, h: 120 },
+    mode: 'plane',
+    domain: { xmin: 0, xmax: 160, ymin: 0, ymax: 120 },
     dx,
-    ppcAxis: PPC_AXIS,
-    boundaryNodes: BOUNDARY_NODES,
-    vMax: vMax * 1.5,
+    bc: WALLS,
     bodies: [
       {
         rect: { x0, y0, x1: x0 + DEMO_BLOCK_MM, y1: y0 + DEMO_BLOCK_MM },
-        material: DEMO_ELASTOMER,
+        material: 'demo_elastomer',
         velocity: DEMO_VELOCITY,
         omega: DEMO_OMEGA,
         bodyId: 0,
+        field: 0,
       },
     ],
   };
@@ -55,41 +49,42 @@ export function demoScene(opts: DemoOptions): PreparedScene {
 export const BENCH_ROD_SPEED = 1.5;
 
 /**
- * Нагрузка бенчмарка: эталонная сцена 120×250 мм из 2.1 целиком заполнена частицами
- * с шагом Δx = √(A/N), так что частиц ≈ N. Стальная плита, в верхней части — «стержень»
- * 10×60 мм со скоростью 1,5 км/с вниз: ударная волна, большие деформации, конкуренция атомиков.
- * Вокруг сцены — поле стенок из BOUNDARY_NODES узлов + 1 ячейка.
+ * Нагрузка бенчмарка: эталонная сцена 120×250 мм из 2.1 целиком заполнена частицами с шагом
+ * Δx = √(A/N), так что частиц ≈ N. Плита из стали 4340 (Джонсон–Кук, Ми–Грюнайзен) и «стержень»
+ * 10×60 мм в своём поле контакта со скоростью 1,5 км/с вниз: ударная волна, пластика, контакт полей.
  */
 export function benchSceneSpec(n: number): SceneSpec {
   const { w, h } = REFERENCE_SCENE_MM;
   const dx = particleSpacing(w * h, n);
-  const pad = (BOUNDARY_NODES + 1) * PPC_AXIS * dx;
   const rodW = 10;
   const rodH = 60;
   // Стержень выровнен по сетке частиц, чтобы тела не перекрывались
   const snap = (v: number) => Math.round(v / dx) * dx;
-  const rx0 = pad + snap((w - rodW) / 2);
+  const rx0 = snap((w - rodW) / 2);
   const rx1 = rx0 + snap(rodW);
-  const ry0 = pad + snap(h - rodH);
-  const top = pad + snap(h);
-  const left = pad;
-  const right = pad + snap(w);
-  const bottom = pad;
-  const steel = STEEL_4340_ELASTIC;
+  const ry0 = snap(h - rodH);
+  const top = snap(h);
+  const right = snap(w);
+  const mat = 'steel_4340';
   return {
-    domain: { w: right + pad, h: top + pad },
+    mode: 'plane',
+    domain: { xmin: 0, xmax: right, ymin: 0, ymax: top },
     dx,
-    ppcAxis: PPC_AXIS,
-    boundaryNodes: BOUNDARY_NODES,
-    vMax: BENCH_ROD_SPEED,
+    bc: { left: Bc.Open, right: Bc.Open, bottom: Bc.Open, top: Bc.Open },
     bodies: [
       // плита под стержнем
-      { rect: { x0: left, y0: bottom, x1: right, y1: ry0 }, material: steel, velocity: [0, 0], bodyId: 0 },
+      { rect: { x0: 0, y0: 0, x1: right, y1: ry0 }, material: mat, velocity: [0, 0], bodyId: 0, field: 0 },
       // по бокам от стержня
-      { rect: { x0: left, y0: ry0, x1: rx0, y1: top }, material: steel, velocity: [0, 0], bodyId: 0 },
-      { rect: { x0: rx1, y0: ry0, x1: right, y1: top }, material: steel, velocity: [0, 0], bodyId: 0 },
+      { rect: { x0: 0, y0: ry0, x1: rx0, y1: top }, material: mat, velocity: [0, 0], bodyId: 0, field: 0 },
+      { rect: { x0: rx1, y0: ry0, x1: right, y1: top }, material: mat, velocity: [0, 0], bodyId: 0, field: 0 },
       // стержень
-      { rect: { x0: rx0, y0: ry0, x1: rx1, y1: top }, material: steel, velocity: [0, -BENCH_ROD_SPEED], bodyId: 1 },
+      {
+        rect: { x0: rx0, y0: ry0, x1: rx1, y1: top },
+        material: mat,
+        velocity: [0, -BENCH_ROD_SPEED],
+        bodyId: 1,
+        field: 1,
+      },
     ],
   };
 }

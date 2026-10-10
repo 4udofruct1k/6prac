@@ -3,7 +3,7 @@
 // (их нет в режиме совместимости WebGPU).
 
 import type { GpuMpm } from '../sim/GpuMpm';
-import { PLANE, VizMode } from '../sim/layout';
+import { PLANE, TAG_BODY_SHIFT, TAG_REMOVED, VizMode } from '../sim/layout';
 
 const RENDER_WGSL = /* wgsl */ `
 struct View {
@@ -49,7 +49,11 @@ fn vs(@builtin(vertex_index) vi: u32,
   out.pos = vec4f(vec2f(px, py) * V.scale + V.offset + c * V.half, 0.0, 1.0);
   out.uv = c;
   out.val = val;
-  out.body = f32(tag >> 16u);
+  out.body = f32((tag >> ${TAG_BODY_SHIFT}u) & 0xffu);
+  if ((tag & ${TAG_REMOVED}u) != 0u) {
+    // Ушедшие за границу частицы не рисуем
+    out.pos = vec4f(2.0, 2.0, 0.0, 1.0);
+  }
   return out;
 }
 
@@ -100,6 +104,8 @@ export class ParticleRenderer {
   private readonly pipeline: GPURenderPipeline;
   private readonly framePipeline: GPURenderPipeline;
   private readonly viewBuf: GPUBuffer;
+  private readonly viewBufMirror: GPUBuffer;
+  private readonly bindGroupMirror: GPUBindGroup;
   private readonly bindGroup: GPUBindGroup;
   readonly format: GPUTextureFormat;
 
@@ -138,34 +144,50 @@ export class ParticleRenderer {
       primitive: { topology: 'line-strip' },
     });
     this.viewBuf = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.viewBufMirror = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.bindGroup = device.createBindGroup({
       layout: bindGroupLayout,
       entries: [{ binding: 0, resource: { buffer: this.viewBuf } }],
     });
+    this.bindGroupMirror = device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [{ binding: 0, resource: { buffer: this.viewBufMirror } }],
+    });
   }
 
-  /** Вписывает область сцены в холст с сохранением пропорций; y вверх. */
+  /**
+   * Вписывает область сцены в холст с сохранением пропорций; y вверх.
+   * Осесимметричная сцена рисуется целым разрезом: вторая копия отражена относительно оси.
+   */
   encode(encoder: GPUCommandEncoder, sim: GpuMpm, mode: VizMode, range: ViewRange): void {
     const canvas = this.context.canvas as HTMLCanvasElement;
-    const { w, h } = sim.scene.domain;
+    const { xmin, xmax, ymin, ymax } = sim.scene.domain;
+    const mirror = sim.scene.mode === 'axisym';
+    const x0 = mirror ? -xmax : xmin;
+    const w = xmax - x0;
+    const h = ymax - ymin;
     const aspect = canvas.width / canvas.height;
     const sceneAspect = w / h;
     const sx = sceneAspect > aspect ? 2 / w : (2 / h) * (1 / aspect);
     const sy = sx * aspect;
-    const view = new ArrayBuffer(64);
-    const f = new Float32Array(view);
-    const u = new Uint32Array(view);
-    f.set([sx, sy, -(w / 2) * sx, -(h / 2) * sy]);
-    // Радиус сплэта ≈ 0,6·Δx, но не меньше пикселя
-    const halfPx = Math.max(0.6 * sim.scene.dx * sx * (canvas.width / 2), 0.75);
-    f.set([halfPx / (canvas.width / 2), halfPx / (canvas.height / 2)], 4);
-    f.set([range.min, range.max], 6);
-    u[8] = mode;
-    // Скорость обнуляется на узлах 0..b−1 (и симметрично сверху/справа); край тела
-    // останавливается у крайнего такого узла — там и рисуем стенку
-    const { gx, gy, h: cell, boundaryNodes: b } = sim.scene;
-    f.set([(b - 1) * cell, (b - 1) * cell, (gx - b) * cell, (gy - b) * cell], 12);
-    this.device.queue.writeBuffer(this.viewBuf, 0, view);
+    const cx = x0 + w / 2;
+    const cy = ymin + h / 2;
+    const pack = (flip: number) => {
+      const view = new ArrayBuffer(64);
+      const f = new Float32Array(view);
+      const u = new Uint32Array(view);
+      f.set([flip * sx, sy, -cx * sx, -cy * sy]);
+      // Радиус сплэта ≈ 0,6·Δx, но не меньше пикселя
+      const halfPx = Math.max(0.6 * sim.scene.dx * sx * (canvas.width / 2), 0.75);
+      f.set([halfPx / (canvas.width / 2), halfPx / (canvas.height / 2)], 4);
+      f.set([range.min, range.max], 6);
+      u[8] = mode;
+      // Рамка — граница расчётной области
+      f.set([xmin, ymin, xmax, ymax], 12);
+      return view;
+    };
+    this.device.queue.writeBuffer(this.viewBuf, 0, pack(1));
+    if (mirror) this.device.queue.writeBuffer(this.viewBufMirror, 0, pack(-1));
 
     const pass = encoder.beginRenderPass({
       colorAttachments: [
@@ -188,10 +210,18 @@ export class ParticleRenderer {
     pass.setVertexBuffer(2, sim.particleBuffer, plane(PLANE.VIZ), size);
     pass.setVertexBuffer(3, sim.particleBuffer, plane(PLANE.TAG), size);
     pass.draw(6, sim.n);
+    if (mirror) {
+      pass.setBindGroup(0, this.bindGroupMirror);
+      pass.setPipeline(this.framePipeline);
+      pass.draw(5);
+      pass.setPipeline(this.pipeline);
+      pass.draw(6, sim.n);
+    }
     pass.end();
   }
 
   destroy(): void {
     this.viewBuf.destroy();
+    this.viewBufMirror.destroy();
   }
 }

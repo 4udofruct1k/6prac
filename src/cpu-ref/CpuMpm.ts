@@ -1,62 +1,124 @@
-// CPU-эталон (4.6, 13): тот же алгоритм, что в sim/kernels.ts, но в float64 и с обычными суммами.
-// Нужен для отладки ядер и для headless-тестов без GPU. Любое изменение физики в WGSL
+// CPU-эталон (4.6, 13): тот же алгоритм, что в sim/kernels.ts, но во float64 и с обычными суммами.
+// Порядок совпадает с GPU: первый P2G, затем на шаге — сетка (контакт, границы), проход по частицам
+// (G2P, материал, перенос, P2G следующего шага) и финализация Δt. Любое изменение физики в WGSL
 // повторяется здесь, иначе самопроверка GPU ↔ CPU разойдётся.
+//
+// Энергия (4.6, 12.2): кинетическая энергия, которую сетка убирает выравниванием скоростей — контакт полей,
+// стенки, проекция сетка → частица, — не пропадает, а становится теплом частиц. Так же искусственная
+// вязкость превращает кинетическую энергию ударной волны в тепло. Сумма сходится точно: узел раздаёт
+// удельную потерю λ = ΔK/m по весам, а Σ_p m_p·Σ_i w_ip·λ_i = Σ_i ΔK_i.
 
-import { PLANE, tagMaterial } from '../sim/layout';
+import { T_ROOM } from '../materials/models';
 import type { PreparedScene } from '../scene/scene';
+import { particleMass } from '../scene/scene';
+import {
+  Bc,
+  FIELDS,
+  GRID_ACC_PER_FIELD,
+  GRID_V_STRIDE,
+  PLANE,
+  TAG_REMOVED,
+  tagField,
+  tagMaterial,
+  tagRemoved,
+} from '../sim/layout';
+import { hasShear, pressureOf, updateMaterial, type MatState } from './physics';
+
+
+/** Накопители P2G поля: масса, импульс (с толчком напряжений), сам толчок, кинетическая энергия частиц, «градиент» массы. */
+const ACC = { M: 0, PX: 1, PY: 2, IX: 3, IY: 4, K: 5, GX: 6, GY: 7 } as const;
+
+export interface Diagnostics {
+  /** Кинетическая энергия частиц в счёте, Дж (плоский режим — на мм толщины, осесимм. — на радиан) */
+  kinetic: number;
+  /** Внутренняя энергия m·e частиц в счёте */
+  internal: number;
+  /** Кинетическая + внутренняя энергия удалённых частиц («ушедшая за границу») */
+  lost: number;
+  total: number;
+  mass: number;
+  momentum: [number, number];
+  centerOfMass: [number, number];
+  velocity: [number, number];
+}
 
 export class CpuMpm {
   readonly n: number;
   readonly gx: number;
   readonly gy: number;
+  readonly gn: number;
   /** PLANE_COUNT плоскостей по n значений, float64; плоскость TAG не используется */
   readonly p: Float64Array;
   readonly tags: Uint32Array;
   stepCount = 0;
+  time = 0;
+  dtCur: number;
+  dtNext: number;
 
-  private readonly gm: Float64Array;
-  private readonly gpx: Float64Array;
-  private readonly gpy: Float64Array;
-  private readonly gvx: Float64Array;
-  private readonly gvy: Float64Array;
+  private readonly acc: Float64Array;
+  private readonly gv: Float64Array;
+  private maxSignal = 0;
+  private primed = false;
 
   constructor(readonly scene: PreparedScene) {
     this.n = scene.n;
     this.gx = scene.gx;
     this.gy = scene.gy;
+    this.gn = scene.gx * scene.gy;
     this.p = Float64Array.from(scene.planes);
     this.tags = new Uint32Array(scene.planes.buffer, scene.planes.byteOffset + PLANE.TAG * this.n * 4, this.n).slice();
-    const gn = this.gx * this.gy;
-    this.gm = new Float64Array(gn);
-    this.gpx = new Float64Array(gn);
-    this.gpy = new Float64Array(gn);
-    this.gvx = new Float64Array(gn);
-    this.gvy = new Float64Array(gn);
-  }
-
-  get time(): number {
-    return this.stepCount * this.scene.dt;
+    this.acc = new Float64Array(FIELDS * GRID_ACC_PER_FIELD * this.gn);
+    this.gv = new Float64Array(GRID_V_STRIDE * this.gn);
+    this.dtCur = scene.dt0;
+    this.dtNext = scene.dt0;
   }
 
   get(plane: number, i: number): number {
     return this.p[plane * this.n + i];
   }
 
+  private at(plane: number, i: number): number {
+    return plane * this.n + i;
+  }
+
   step(count = 1): void {
+    if (!this.primed) {
+      this.acc.fill(0);
+      for (let i = 0; i < this.n; i++) {
+        if (tagRemoved(this.tags[i])) continue;
+        const mat = this.scene.materials[tagMaterial(this.tags[i])];
+        const pr = pressureOf(mat, this.get(PLANE.J, i), this.get(PLANE.E, i), this.get(PLANE.D, i));
+        this.scatter(
+          i,
+          this.get(PLANE.X, i),
+          this.get(PLANE.Y, i),
+          this.get(PLANE.VX, i),
+          this.get(PLANE.VY, i),
+          [this.get(PLANE.C00, i), this.get(PLANE.C01, i), this.get(PLANE.C10, i), this.get(PLANE.C11, i)],
+          this.get(PLANE.SXX, i),
+          this.get(PLANE.SYY, i),
+          this.get(PLANE.SXY, i),
+          pr,
+          this.dtCur,
+        );
+      }
+      this.primed = true;
+    }
     for (let k = 0; k < count; k++) {
-      this.p2g();
       this.gridUpdate();
-      this.g2p();
-      this.stepCount++;
+      this.g2p2g();
+      this.finalize();
     }
   }
 
+  // Квадратичный B-сплайн относительно начала сетки
   private stencil(x: number, y: number) {
-    const { invH, gx, gy } = this.consts();
-    const xg = x * invH;
-    const yg = y * invH;
-    const bx = clamp(Math.floor(xg - 0.5), 0, gx - 3);
-    const by = clamp(Math.floor(yg - 0.5), 0, gy - 3);
+    const s = this.scene;
+    const invH = 1 / s.h;
+    const xg = (x - s.origin[0]) * invH;
+    const yg = (y - s.origin[1]) * invH;
+    const bx = clamp(Math.floor(xg - 0.5), 0, this.gx - 3);
+    const by = clamp(Math.floor(yg - 0.5), 0, this.gy - 3);
     const fx = xg - bx;
     const fy = yg - by;
     return {
@@ -69,196 +131,336 @@ export class CpuMpm {
     };
   }
 
-  private consts() {
+  /** P2G одной частицы: масса, импульс (APIC + импульс напряжений за dt), «градиент» массы. */
+  private scatter(
+    i: number,
+    x: number,
+    y: number,
+    vx: number,
+    vy: number,
+    c: readonly [number, number, number, number],
+    sxx: number,
+    syy: number,
+    sxy: number,
+    pq: number,
+    dt: number,
+  ): void {
     const s = this.scene;
-    return { h: s.h, invH: 1 / s.h, dt: s.dt, gx: this.gx, gy: this.gy };
+    const tag = this.tags[i];
+    const mat = s.materials[tagMaterial(tag)];
+    const vol0 = this.get(PLANE.VOL0, i);
+    const m = particleMass(mat, vol0);
+    const V = vol0 * this.get(PLANE.J, i);
+    const invH = 1 / s.h;
+    // Напряжение Коши σ = s − (p + q)·I
+    const s00 = sxx - pq;
+    const s11 = syy - pq;
+    const s01 = sxy;
+    const k = -dt * V * 4 * invH * invH;
+    // Осесимметричный режим: кольцевое напряжение даёт радиальную силу −V·σθθ·w/r
+    let hoop = 0;
+    if (s.mode === 'axisym') {
+      const sTT = -(sxx + syy) - pq;
+      hoop = (-dt * V * sTT) / Math.max(x, s.rmin);
+    }
+    const f = tagField(tag);
+    const base = f * GRID_ACC_PER_FIELD * this.gn;
+    const st = this.stencil(x, y);
+    for (let b = 0; b < 3; b++) {
+      for (let a = 0; a < 3; a++) {
+        const w = st.wx[a] * st.wy[b];
+        const dx = (a - st.fx) * s.h;
+        const dy = (b - st.fy) * s.h;
+        const node = st.bx + a + (st.by + b) * this.gx;
+        // Скорость частицы в узле u = v + C·d; толчок напряжений — отдельно, чтобы видеть потери переноса
+        const ux = vx + c[0] * dx + c[1] * dy;
+        const uy = vy + c[2] * dx + c[3] * dy;
+        const ix = k * (s00 * dx + s01 * dy) + hoop;
+        const iy = k * (s01 * dx + s11 * dy);
+        this.acc[base + ACC.M * this.gn + node] += w * m;
+        this.acc[base + ACC.PX * this.gn + node] += w * (m * ux + ix);
+        this.acc[base + ACC.PY * this.gn + node] += w * (m * uy + iy);
+        this.acc[base + ACC.IX * this.gn + node] += w * ix;
+        this.acc[base + ACC.IY * this.gn + node] += w * iy;
+        this.acc[base + ACC.K * this.gn + node] += 0.5 * w * m * (ux * ux + uy * uy);
+        this.acc[base + ACC.GX * this.gn + node] += w * m * dx;
+        this.acc[base + ACC.GY * this.gn + node] += w * m * dy;
+      }
+    }
   }
 
-  private p2g(): void {
-    const { h, invH, dt, gx } = this.consts();
-    const { p, n } = this;
-    this.gm.fill(0);
-    this.gpx.fill(0);
-    this.gpy.fill(0);
-    for (let i = 0; i < n; i++) {
-      const x = p[PLANE.X * n + i];
-      const y = p[PLANE.Y * n + i];
-      const vx = p[PLANE.VX * n + i];
-      const vy = p[PLANE.VY * n + i];
-      const c00 = p[PLANE.C00 * n + i];
-      const c01 = p[PLANE.C01 * n + i];
-      const c10 = p[PLANE.C10 * n + i];
-      const c11 = p[PLANE.C11 * n + i];
-      const f00 = p[PLANE.F00 * n + i];
-      const f01 = p[PLANE.F01 * n + i];
-      const f10 = p[PLANE.F10 * n + i];
-      const f11 = p[PLANE.F11 * n + i];
-      const m = p[PLANE.MASS * n + i];
-      const vol0 = p[PLANE.VOL0 * n + i];
-      const mat = this.scene.materials[tagMaterial(this.tags[i])];
-
-      const lnJ = Math.log(Math.max(f00 * f11 - f01 * f10, 1e-6));
-      const b00 = f00 * f00 + f01 * f01;
-      const b01 = f00 * f10 + f01 * f11;
-      const b11 = f10 * f10 + f11 * f11;
-      const t00 = mat.mu * (b00 - 1) + mat.lambda * lnJ;
-      const t01 = mat.mu * b01;
-      const t11 = mat.mu * (b11 - 1) + mat.lambda * lnJ;
-      const k = -dt * vol0 * 4 * invH * invH;
-      const a00 = k * t00 + m * c00;
-      const a01 = k * t01 + m * c01;
-      const a10 = k * t01 + m * c10;
-      const a11 = k * t11 + m * c11;
-
-      const s = this.stencil(x, y);
-      for (let b = 0; b < 3; b++) {
-        for (let a = 0; a < 3; a++) {
-          const w = s.wx[a] * s.wy[b];
-          const dxp = (a - s.fx) * h;
-          const dyp = (b - s.fy) * h;
-          const node = s.bx + a + (s.by + b) * gx;
-          this.gm[node] += w * m;
-          this.gpx[node] += w * (m * vx + a00 * dxp + a01 * dyp);
-          this.gpy[node] += w * (m * vy + a10 * dxp + a11 * dyp);
+  /**
+   * Импульс → скорость обоих полей, контакт полей (4.5), гравитация, границы. Накопители обнуляются.
+   * Удельная потеря λ узла = (потеря сведения частиц в узел + потеря неупругого контакта) / масса узла;
+   * обе считаются по скоростям без толчка напряжений, иначе реакция опор выглядела бы как потеря.
+   */
+  private gridUpdate(): void {
+    const s = this.scene;
+    const gn = this.gn;
+    const A = (f: number, k: number, id: number) => this.acc[f * GRID_ACC_PER_FIELD * gn + k * gn + id];
+    for (let id = 0; id < gn; id++) {
+      const m0 = A(0, ACC.M, id);
+      const m1 = A(1, ACC.M, id);
+      // Полные скорости (с толчком) и скорости сведения частиц без толчка
+      const v = [0, 0, 0, 0];
+      const u = [0, 0, 0, 0];
+      let loss = 0;
+      for (let f = 0; f < 2; f++) {
+        const m = f === 0 ? m0 : m1;
+        if (m <= 0) continue;
+        const px = A(f, ACC.PX, id);
+        const py = A(f, ACC.PY, id);
+        const ux = (px - A(f, ACC.IX, id)) / m;
+        const uy = (py - A(f, ACC.IY, id)) / m;
+        v[2 * f] = px / m;
+        v[2 * f + 1] = py / m + this.dtCur * s.gravityY;
+        u[2 * f] = ux;
+        u[2 * f + 1] = uy;
+        // Потеря P2G: Σ ½·w·m·|u_p|² − ½·M·|ū|² ≥ 0 (частицы в узле движутся по-разному)
+        loss += Math.max(A(f, ACC.K, id) - 0.5 * m * (ux * ux + uy * uy), 0);
+      }
+      if (m0 > 0 && m1 > 0) {
+        // Нормаль из тела 1 (снаряд) в тело 0 (мишень): Σ m·w·(x_i − x_p) смотрит из тела наружу
+        const gx = A(1, ACC.GX, id) - A(0, ACC.GX, id);
+        const gy = A(1, ACC.GY, id) - A(0, ACC.GY, id);
+        const len = Math.hypot(gx, gy);
+        if (len > 0) {
+          const nx = gx / len;
+          const ny = gy / len;
+          const k0 = 0.5 * (m0 * (u[0] ** 2 + u[1] ** 2) + m1 * (u[2] ** 2 + u[3] ** 2));
+          contact(u, m0, m1, nx, ny, s.friction);
+          loss += Math.max(k0 - 0.5 * (m0 * (u[0] ** 2 + u[1] ** 2) + m1 * (u[2] ** 2 + u[3] ** 2)), 0);
+          contact(v, m0, m1, nx, ny, s.friction);
         }
       }
-    }
-  }
-
-  private gridUpdate(): void {
-    const { dt, gx, gy } = this.consts();
-    const bound = this.scene.boundaryNodes;
-    const g = this.scene.gravityY;
-    for (let id = 0; id < gx * gy; id++) {
-      const m = this.gm[id];
-      let vx = 0;
-      let vy = 0;
-      if (m > 0) {
-        vx = this.gpx[id] / m;
-        vy = this.gpy[id] / m + dt * g;
-        const ix = id % gx;
-        const iy = Math.floor(id / gx);
-        if (ix < bound && vx < 0) vx = 0;
-        if (ix + bound >= gx && vx > 0) vx = 0;
-        if (iy < bound && vy < 0) vy = 0;
-        if (iy + bound >= gy && vy > 0) vy = 0;
+      const ix = id % this.gx;
+      const iy = Math.floor(id / this.gx);
+      const xi = s.origin[0] + ix * s.h;
+      const yi = s.origin[1] + iy * s.h;
+      for (let f = 0; f < 2; f++) {
+        const m = f === 0 ? m0 : m1;
+        if (m <= 0) continue;
+        // Стенка неподвижна и работы не совершает: кинетическая энергия, которую она гасит у частиц
+        // (по скорости без толчка напряжений), остаётся в теле теплом
+        const ku = 0.5 * m * (u[2 * f] ** 2 + u[2 * f + 1] ** 2);
+        const atL = xi <= s.domain.xmin;
+        const atR = xi >= s.domain.xmax;
+        const atB = yi <= s.domain.ymin;
+        const atT = yi >= s.domain.ymax;
+        [u[2 * f]] = applyBc(u[2 * f], atL, atR, s.bc.left, s.bc.right);
+        [u[2 * f + 1]] = applyBc(u[2 * f + 1], atB, atT, s.bc.bottom, s.bc.top);
+        if (s.lockX) u[2 * f] = 0;
+        loss += Math.max(ku - 0.5 * m * (u[2 * f] ** 2 + u[2 * f + 1] ** 2), 0);
+        [v[2 * f]] = applyBc(v[2 * f], atL, atR, s.bc.left, s.bc.right);
+        [v[2 * f + 1]] = applyBc(v[2 * f + 1], atB, atT, s.bc.bottom, s.bc.top);
+        if (s.lockX) v[2 * f] = 0;
       }
-      this.gvx[id] = vx;
-      this.gvy[id] = vy;
+      const g = GRID_V_STRIDE * id;
+      this.gv[g] = v[0];
+      this.gv[g + 1] = v[1];
+      this.gv[g + 2] = v[2];
+      this.gv[g + 3] = v[3];
+      this.gv[g + 4] = m0 + m1 > 0 ? loss / (m0 + m1) : 0;
     }
+    this.acc.fill(0);
   }
 
-  private g2p(): void {
-    const { h, invH, dt, gx, gy } = this.consts();
+  private g2p2g(): void {
+    const s = this.scene;
     const { p, n } = this;
+    const dt = this.dtCur;
+    const invH = 1 / s.h;
+    const axisym = s.mode === 'axisym';
+    let maxSignal = 0;
     for (let i = 0; i < n; i++) {
-      const x = p[PLANE.X * n + i];
-      const y = p[PLANE.Y * n + i];
-      const s = this.stencil(x, y);
+      const tag = this.tags[i];
+      if (tagRemoved(tag)) continue;
+      const f = tagField(tag);
+      const x = p[this.at(PLANE.X, i)];
+      const y = p[this.at(PLANE.Y, i)];
+      const st = this.stencil(x, y);
       let vx = 0;
       let vy = 0;
-      let c00 = 0;
-      let c01 = 0;
-      let c10 = 0;
-      let c11 = 0;
+      const c = [0, 0, 0, 0];
+      // Σ w·|v_i|² и Σ w·λ_i — для тепла от проекции и от ограничений сетки
+      let sumV2 = 0;
+      let heatGrid = 0;
       for (let b = 0; b < 3; b++) {
         for (let a = 0; a < 3; a++) {
-          const w = s.wx[a] * s.wy[b];
-          const dxp = (a - s.fx) * h;
-          const dyp = (b - s.fy) * h;
-          const node = s.bx + a + (s.by + b) * gx;
-          const gvx = this.gvx[node];
-          const gvy = this.gvy[node];
+          const w = st.wx[a] * st.wy[b];
+          const dxp = (a - st.fx) * s.h;
+          const dyp = (b - st.fy) * s.h;
+          const node = st.bx + a + (st.by + b) * this.gx;
+          const gvx = this.gv[GRID_V_STRIDE * node + 2 * f];
+          const gvy = this.gv[GRID_V_STRIDE * node + 2 * f + 1];
           vx += w * gvx;
           vy += w * gvy;
-          c00 += w * gvx * dxp;
-          c01 += w * gvx * dyp;
-          c10 += w * gvy * dxp;
-          c11 += w * gvy * dyp;
+          sumV2 += w * (gvx * gvx + gvy * gvy);
+          heatGrid += w * this.gv[GRID_V_STRIDE * node + 4];
+          c[0] += w * gvx * dxp;
+          c[1] += w * gvx * dyp;
+          c[2] += w * gvy * dxp;
+          c[3] += w * gvy * dyp;
         }
       }
-      const cs = 4 * invH * invH;
-      c00 *= cs;
-      c01 *= cs;
-      c10 *= cs;
-      c11 *= cs;
+      for (let k = 0; k < 4; k++) c[k] *= 4 * invH * invH;
+      const C = c as [number, number, number, number];
 
-      const f00 = p[PLANE.F00 * n + i];
-      const f01 = p[PLANE.F01 * n + i];
-      const f10 = p[PLANE.F10 * n + i];
-      const f11 = p[PLANE.F11 * n + i];
-      p[PLANE.F00 * n + i] = (1 + dt * c00) * f00 + dt * c01 * f10;
-      p[PLANE.F01 * n + i] = (1 + dt * c00) * f01 + dt * c01 * f11;
-      p[PLANE.F10 * n + i] = dt * c10 * f00 + (1 + dt * c11) * f10;
-      p[PLANE.F11 * n + i] = dt * c10 * f01 + (1 + dt * c11) * f11;
+      const mat = s.materials[tagMaterial(tag)];
+      const dzz = axisym ? vx / Math.max(x, s.rmin) : 0;
+      // Потеря проекции сетка → частица (APIC): ½·Σ w·|v_i − v_p − C·d|² = ½·(Σ w|v_i|² − |v_p|² − h²/4·|C|²)
+      const cc = C[0] * C[0] + C[1] * C[1] + C[2] * C[2] + C[3] * C[3];
+      const heat = heatGrid + 0.5 * Math.max(sumV2 - vx * vx - vy * vy - 0.25 * s.h * s.h * cc, 0);
+      const s0: MatState = {
+        J: p[this.at(PLANE.J, i)],
+        sxx: p[this.at(PLANE.SXX, i)],
+        syy: p[this.at(PLANE.SYY, i)],
+        sxy: p[this.at(PLANE.SXY, i)],
+        eps: p[this.at(PLANE.EPS, i)],
+        e: p[this.at(PLANE.E, i)] + heat,
+        T: p[this.at(PLANE.T, i)] + heat / mat.cp,
+        D: p[this.at(PLANE.D, i)],
+      };
+      const r = updateMaterial(mat, s0, C, dzz, dt, s.h, s.c1, s.c2);
 
-      p[PLANE.X * n + i] = clamp(x + dt * vx, h, (gx - 2) * h);
-      p[PLANE.Y * n + i] = clamp(y + dt * vy, h, (gy - 2) * h);
-      p[PLANE.VX * n + i] = vx;
-      p[PLANE.VY * n + i] = vy;
-      p[PLANE.C00 * n + i] = c00;
-      p[PLANE.C01 * n + i] = c01;
-      p[PLANE.C10 * n + i] = c10;
-      p[PLANE.C11 * n + i] = c11;
+      const nx = x + dt * vx;
+      const ny = y + dt * vy;
+      p[this.at(PLANE.X, i)] = nx;
+      p[this.at(PLANE.Y, i)] = ny;
+      p[this.at(PLANE.VX, i)] = vx;
+      p[this.at(PLANE.VY, i)] = vy;
+      p[this.at(PLANE.C00, i)] = C[0];
+      p[this.at(PLANE.C01, i)] = C[1];
+      p[this.at(PLANE.C10, i)] = C[2];
+      p[this.at(PLANE.C11, i)] = C[3];
+      p[this.at(PLANE.J, i)] = r.J;
+      p[this.at(PLANE.SXX, i)] = r.sxx;
+      p[this.at(PLANE.SYY, i)] = r.syy;
+      p[this.at(PLANE.SXY, i)] = r.sxy;
+      p[this.at(PLANE.EPS, i)] = r.eps;
+      p[this.at(PLANE.E, i)] = r.e;
+      p[this.at(PLANE.T, i)] = r.T;
+      p[this.at(PLANE.D, i)] = r.D;
+
+      // Частица за пределами области (с запасом 1,5h, пока шаблон в сетке) удаляется
+      const m = 1.5 * s.h;
+      const out =
+        nx < s.domain.xmin - m || nx > s.domain.xmax + m || ny < s.domain.ymin - m || ny > s.domain.ymax + m;
+      if (out) {
+        this.tags[i] = tag | TAG_REMOVED;
+        continue;
+      }
+      maxSignal = Math.max(maxSignal, r.signal + Math.hypot(vx, vy));
+      this.scatter(i, nx, ny, vx, vy, C, r.sxx, r.syy, r.sxy, r.p + r.q, this.dtNext);
     }
+    this.maxSignal = maxSignal;
   }
 
-  /** Интегралы для проверок: импульс, момент импульса, кинетическая и упругая энергия (Дж на мм толщины). */
-  diagnostics() {
+  /** Конец шага: время, Δt следующего шага по Куранту от состояния после шага (4.3, шаг 7). */
+  private finalize(): void {
+    this.time += this.dtCur;
+    this.dtCur = this.dtNext;
+    if (this.maxSignal > 0) this.dtNext = (this.scene.cfl * this.scene.dx) / this.maxSignal;
+    this.maxSignal = 0;
+    this.stepCount++;
+  }
+
+  /** Давление частицы по EOS (без q), ГПа. */
+  pressure(i: number): number {
+    const mat = this.scene.materials[tagMaterial(this.tags[i])];
+    return pressureOf(mat, this.get(PLANE.J, i), this.get(PLANE.E, i), this.get(PLANE.D, i));
+  }
+
+  isRemoved(i: number): boolean {
+    return tagRemoved(this.tags[i]);
+  }
+
+  /** Энергии и импульс (12.2): кинетическая + внутренняя + ушедшая за границу. */
+  diagnostics(): Diagnostics {
     const { p, n } = this;
+    const mats = this.scene.materials;
+    let kinetic = 0;
+    let internal = 0;
+    let lost = 0;
     let mass = 0;
     let px = 0;
     let py = 0;
     let mx = 0;
     let my = 0;
-    let kinetic = 0;
-    let elastic = 0;
     for (let i = 0; i < n; i++) {
-      const m = p[PLANE.MASS * n + i];
-      const x = p[PLANE.X * n + i];
-      const y = p[PLANE.Y * n + i];
-      const vx = p[PLANE.VX * n + i];
-      const vy = p[PLANE.VY * n + i];
+      const m = particleMass(mats[tagMaterial(this.tags[i])], p[this.at(PLANE.VOL0, i)]);
+      const vx = p[this.at(PLANE.VX, i)];
+      const vy = p[this.at(PLANE.VY, i)];
+      const ke = 0.5 * m * (vx * vx + vy * vy);
+      const ie = m * p[this.at(PLANE.E, i)];
+      if (tagRemoved(this.tags[i])) {
+        lost += ke + ie;
+        continue;
+      }
+      kinetic += ke;
+      internal += ie;
       mass += m;
       px += m * vx;
       py += m * vy;
-      mx += m * x;
-      my += m * y;
-      kinetic += 0.5 * m * (vx * vx + vy * vy);
-      const f00 = p[PLANE.F00 * n + i];
-      const f01 = p[PLANE.F01 * n + i];
-      const f10 = p[PLANE.F10 * n + i];
-      const f11 = p[PLANE.F11 * n + i];
-      const lnJ = Math.log(f00 * f11 - f01 * f10);
-      const mat = this.scene.materials[tagMaterial(this.tags[i])];
-      // ψ = μ/2 (tr FᵀF − 2) − μ ln J + λ/2 (ln J)², F33 = 1
-      const trC = f00 * f00 + f01 * f01 + f10 * f10 + f11 * f11;
-      elastic += p[PLANE.VOL0 * n + i] * (0.5 * mat.mu * (trC - 2) - mat.mu * lnJ + 0.5 * mat.lambda * lnJ * lnJ);
-    }
-    let angular = 0;
-    const cx = mx / mass;
-    const cy = my / mass;
-    // APIC сохраняет момент вместе с «собственным» членом частицы m·(B_yx − B_xy), B = C·h²/4
-    const d = (this.scene.h * this.scene.h) / 4;
-    for (let i = 0; i < n; i++) {
-      const m = p[PLANE.MASS * n + i];
-      const rx = p[PLANE.X * n + i] - cx;
-      const ry = p[PLANE.Y * n + i] - cy;
-      angular += m * (rx * p[PLANE.VY * n + i] - ry * p[PLANE.VX * n + i]);
-      angular += m * d * (p[PLANE.C10 * n + i] - p[PLANE.C01 * n + i]);
+      mx += m * p[this.at(PLANE.X, i)];
+      my += m * p[this.at(PLANE.Y, i)];
     }
     return {
-      mass,
-      momentum: [px, py] as [number, number],
-      centerOfMass: [cx, cy] as [number, number],
-      velocity: [px / mass, py / mass] as [number, number],
-      angularMomentum: angular,
       kinetic,
-      elastic,
+      internal,
+      lost,
+      total: kinetic + internal + lost,
+      mass,
+      momentum: [px, py],
+      centerOfMass: [mx / mass, my / mass],
+      velocity: [px / mass, py / mass],
     };
   }
+
+  /** Сдвиговая жёсткость частицы есть (не разрушена, не расплавлена). */
+  intact(i: number): boolean {
+    const mat = this.scene.materials[tagMaterial(this.tags[i])];
+    return hasShear(mat, this.get(PLANE.D, i), this.get(PLANE.T, i));
+  }
+}
+
+/**
+ * Контакт полей на узле (4.5): при сближении убирает нормальную относительную скорость, касательную
+ * гасит трением Кулона; импульс узла сохраняется. v = [v0x, v0y, v1x, v1y], n — из тела 1 в тело 0.
+ */
+export function contact(v: number[], m0: number, m1: number, nx: number, ny: number, friction: number): void {
+  const mt = m0 + m1;
+  const cmx = (m0 * v[0] + m1 * v[2]) / mt;
+  const cmy = (m0 * v[1] + m1 * v[3]) / mt;
+  const ddx = v[2] - cmx;
+  const ddy = v[3] - cmy;
+  const dn = ddx * nx + ddy * ny;
+  if (dn <= 0) return;
+  const tx = ddx - dn * nx;
+  const ty = ddy - dn * ny;
+  const tl = Math.hypot(tx, ty);
+  const kt = tl > 0 ? Math.min((friction * dn) / tl, 1) : 0;
+  v[2] -= dn * nx + kt * tx;
+  v[3] -= dn * ny + kt * ty;
+  v[0] = (mt * cmx - m1 * v[2]) / m0;
+  v[1] = (mt * cmy - m1 * v[3]) / m0;
+}
+
+/** Граница стороны: стенка не пускает наружу, симметрия обнуляет нормальную скорость. */
+export function applyBc(v: number, atMin: boolean, atMax: boolean, bcMin: Bc, bcMax: Bc): [number] {
+  if (atMin) {
+    if (bcMin === Bc.Wall && v < 0) v = 0;
+    if (bcMin === Bc.Symmetry) v = 0;
+  }
+  if (atMax) {
+    if (bcMax === Bc.Wall && v > 0) v = 0;
+    if (bcMax === Bc.Symmetry) v = 0;
+  }
+  return [v];
 }
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
+
+export { T_ROOM };

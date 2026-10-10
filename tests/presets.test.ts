@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { kernelMaterial } from '../src/materials';
+import { soundSpeed } from '../src/materials/models';
 import {
   QUALITY_PRESETS,
   REFERENCE_SCENE_MM,
   cflTimeStep,
-  longitudinalSoundSpeed,
   particleSpacing,
 } from '../src/scene/presets';
-import { STEEL_4340_ELASTIC } from '../src/scene/materials';
 import { benchScene } from '../src/scene/scenes';
 import { PLANE } from '../src/sim/layout';
 
@@ -40,12 +40,11 @@ describe('пресеты качества (2.1)', () => {
 
 describe('шаг по времени (2.2, 4.3)', () => {
   it('пример спеки: Δx = 0,5 мм, c ≈ 6 км/с, v = 2 км/с → около 20 нс', () => {
-    const dt = cflTimeStep(0.5, 6 + 2);
-    expect(dt * 1000).toBeCloseTo(18.75, 6);
+    expect(cflTimeStep(0.5, 6 + 2) * 1000).toBeCloseTo(18.75, 6);
   });
 
-  it('скорость звука стали 4340 ≈ 5,7 км/с', () => {
-    const m = STEEL_4340_ELASTIC;
-    expect(longitudinalSoundSpeed(m.K, m.G, m.density)).toBeCloseTo(5.74, 2);
+  it('скорость звука стали 4340 в покое: √((ρ0·C0² + 4/3·G)/ρ0) ≈ 5,3 км/с', () => {
+    const m = kernelMaterial('steel_4340');
+    expect(soundSpeed(m, 1, 0, true)).toBeCloseTo(Math.sqrt((7.84 * 3.935 ** 2 + (4 / 3) * 76) / 7.84), 10);
   });
 });

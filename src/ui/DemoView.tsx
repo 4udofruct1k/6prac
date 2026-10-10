@@ -1,22 +1,21 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { ParticleRenderer, type ViewRange } from '../render/ParticleRenderer';
-import { DEMO_ELASTOMER } from '../scene/materials';
-import { demoScene } from '../scene/scenes';
+import { ParticleRenderer } from '../render/ParticleRenderer';
+import { DEMOS } from '../scene/demos';
 import { GpuMpm } from '../sim/GpuMpm';
 import { errorText, type GpuContext } from '../sim/gpu';
 import { VizMode } from '../sim/layout';
 
-const RESOLUTIONS = [24, 48, 96, 160];
+const VIZ_FIELDS: { mode: VizMode; label: string; unit: string }[] = [
+  { mode: VizMode.Speed, label: 'Скорость |v|', unit: 'км/с' },
+  { mode: VizMode.Pressure, label: 'Давление', unit: 'ГПа' },
+  { mode: VizMode.Temperature, label: 'Температура (средняя по частице)', unit: 'K' },
+  { mode: VizMode.PlasticStrain, label: 'Пластическая деформация ε̄p', unit: '' },
+  { mode: VizMode.Damage, label: 'Повреждение D', unit: '' },
+  { mode: VizMode.VonMises, label: 'Напряжение по Мизесу', unit: 'ГПа' },
+  { mode: VizMode.Body, label: 'Тело', unit: '' },
+];
 
-const VIZ: Record<VizMode, { label: string; range: ViewRange; legend: string }> = {
-  [VizMode.Speed]: { label: 'Скорость |v|', range: { min: 0, max: 0.12 }, legend: '0 … 0,12 км/с' },
-  [VizMode.Pressure]: {
-    label: 'Давление',
-    range: { min: -0.01, max: 0.01 },
-    legend: 'растяжение −0,01 … сжатие +0,01 ГПа',
-  },
-  [VizMode.Body]: { label: 'Тело', range: { min: 0, max: 1 }, legend: 'цвет тела' },
-};
+const fmt = (v: number) => v.toLocaleString('ru', { maximumSignificantDigits: 3 });
 
 interface Hud {
   t: number;
@@ -29,10 +28,12 @@ interface Hud {
 
 export function DemoView({ gpu }: { gpu: GpuContext }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [across, setAcross] = useState(48);
+  const [demoId, setDemoId] = useState(DEMOS[0].id);
+  const demo = DEMOS.find((d) => d.id === demoId)!;
+  const [resolution, setResolution] = useState(demo.defaultResolution);
   const [running, setRunning] = useState(true);
-  const [viz, setViz] = useState<VizMode>(VizMode.Speed);
-  const [usPerFrame, setUsPerFrame] = useState(3);
+  const [viz, setViz] = useState<VizMode>(demo.defaultViz);
+  const [usPerFrame, setUsPerFrame] = useState(demo.usPerFrame);
   const [resetKey, setResetKey] = useState(0);
   const [hud, setHud] = useState<Hud | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -41,6 +42,16 @@ export function DemoView({ gpu }: { gpu: GpuContext }) {
   live.current.running = running;
   live.current.viz = viz;
   live.current.usPerFrame = usPerFrame;
+
+  const pickDemo = (id: string) => {
+    const d = DEMOS.find((x) => x.id === id)!;
+    setDemoId(id);
+    setResolution(d.defaultResolution);
+    setViz(d.defaultViz);
+    setUsPerFrame(d.usPerFrame);
+  };
+
+  const rangeOf = (mode: VizMode): [number, number] => demo.ranges[mode] ?? [0, 1];
 
   useEffect(() => {
     const canvas = canvasRef.current!;
@@ -54,6 +65,7 @@ export function DemoView({ gpu }: { gpu: GpuContext }) {
     let raf = 0;
     let sim: GpuMpm | undefined;
     let renderer: ParticleRenderer | undefined;
+    let reading = false;
 
     const resize = () => {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -70,8 +82,7 @@ export function DemoView({ gpu }: { gpu: GpuContext }) {
 
     (async () => {
       try {
-        const scene = demoScene({ across });
-        sim = await GpuMpm.create(device, scene);
+        sim = await GpuMpm.create(device, demo.build(resolution));
         renderer = new ParticleRenderer(device, context);
       } catch (e) {
         setError(errorText(e));
@@ -92,12 +103,13 @@ export function DemoView({ gpu }: { gpu: GpuContext }) {
         const l = live.current;
         sim.setVizMode(l.viz);
         const encoder = device.createCommandEncoder();
-        // Кадр продвигает событие на фиксированное время, а не на число шагов: шаг Δt ∝ Δx,
-        // иначе на мелкой сетке анимация идёт медленнее и выглядит иначе
-        const steps = l.running ? Math.max(1, Math.round(l.usPerFrame / sim.dt)) : l.stepOnce ? 1 : 0;
+        // Кадр продвигает событие на фиксированное время, а не на число шагов: Δt ∝ Δx и меняется по
+        // Куранту; берём последний прочитанный с GPU
+        const steps = l.running ? Math.max(1, Math.min(2000, Math.round(l.usPerFrame / sim.info.dt))) : l.stepOnce ? 1 : 0;
         l.stepOnce = false;
         sim.encodeSteps(encoder, steps);
-        renderer.encode(encoder, sim, l.viz, VIZ[l.viz].range);
+        const [min, max] = rangeOf(l.viz);
+        renderer.encode(encoder, sim, l.viz, { min, max });
         device.queue.submit([encoder.finish()]);
         frames++;
         const now = performance.now();
@@ -106,9 +118,17 @@ export function DemoView({ gpu }: { gpu: GpuContext }) {
           frames = 0;
           fpsT0 = now;
         }
-        if (now - hudT > 100) {
+        if (now - hudT > 100 && !reading) {
           hudT = now;
-          setHud({ t: sim.time, steps: sim.stepCount, fps, n: sim.n, dtNs: sim.dt * 1000, dx: sim.scene.dx });
+          reading = true;
+          const s = sim;
+          s.readStep()
+            .then((info) => {
+              if (disposed) return;
+              setHud({ t: info.time, steps: info.steps, fps, n: s.n, dtNs: info.dt * 1000, dx: s.scene.dx });
+            })
+            .catch(() => {})
+            .finally(() => (reading = false));
         }
         raf = requestAnimationFrame(frame);
       };
@@ -122,7 +142,16 @@ export function DemoView({ gpu }: { gpu: GpuContext }) {
       sim?.destroy();
       renderer?.destroy();
     };
-  }, [gpu, across, resetKey]);
+  }, [gpu, demoId, resolution, resetKey]);
+
+  const field = VIZ_FIELDS.find((f) => f.mode === viz)!;
+  const [lo, hi] = rangeOf(viz);
+  const legend =
+    viz === VizMode.Body
+      ? 'цвет тела'
+      : viz === VizMode.Pressure
+        ? `растяжение ${fmt(lo)} … сжатие ${fmt(hi)} ГПа`
+        : `${fmt(lo)} … ${fmt(hi)}${field.unit ? ' ' + field.unit : ''}`;
 
   return (
     <section class="demo">
@@ -132,7 +161,7 @@ export function DemoView({ gpu }: { gpu: GpuContext }) {
           <div class="hud">
             <div>T+ {hud.t.toFixed(1)} мкс</div>
             <div>шаг {hud.steps}</div>
-            <div>Δt {hud.dtNs.toFixed(0)} нс</div>
+            <div>Δt {hud.dtNs.toFixed(1)} нс</div>
             <div>
               N {hud.n.toLocaleString('ru')} · Δx {hud.dx.toFixed(2)} мм
             </div>
@@ -140,9 +169,17 @@ export function DemoView({ gpu }: { gpu: GpuContext }) {
           </div>
         )}
       </div>
-      <div class="legend">{VIZ[viz].legend}</div>
+      <div class="legend">{legend}</div>
       {error && <p class="error">{error}</p>}
       <div class="controls">
+        <label>
+          Сцена
+          <select value={demoId} onChange={(e) => pickDemo(e.currentTarget.value)}>
+            {DEMOS.map((d) => (
+              <option value={d.id}>{d.label}</option>
+            ))}
+          </select>
+        </label>
         <button onClick={() => setRunning(!running)}>{running ? 'Пауза' : 'Пуск'}</button>
         <button disabled={running} onClick={() => (live.current.stepOnce = true)}>
           Шаг
@@ -151,35 +188,29 @@ export function DemoView({ gpu }: { gpu: GpuContext }) {
         <label>
           Поле
           <select value={viz} onChange={(e) => setViz(Number(e.currentTarget.value) as VizMode)}>
-            {[VizMode.Speed, VizMode.Pressure, VizMode.Body].map((m) => (
-              <option value={m}>{VIZ[m].label}</option>
+            {VIZ_FIELDS.map((f) => (
+              <option value={f.mode}>{f.label}</option>
             ))}
           </select>
         </label>
         <label>
-          Частиц по стороне
-          <select value={across} onChange={(e) => setAcross(Number(e.currentTarget.value))}>
-            {RESOLUTIONS.map((r) => (
-              <option value={r}>
-                {r} ({(r * r).toLocaleString('ru')})
-              </option>
+          {demo.resolutionLabel}
+          <select value={resolution} onChange={(e) => setResolution(Number(e.currentTarget.value))}>
+            {demo.resolutions.map((r) => (
+              <option value={r}>{r}</option>
             ))}
           </select>
         </label>
         <label>
           Мкс за кадр
           <select value={usPerFrame} onChange={(e) => setUsPerFrame(Number(e.currentTarget.value))}>
-            {[0.5, 1, 2, 3, 5, 10].map((s) => (
+            {[0.2, 0.5, 1, 2, 3, 5, 10].map((s) => (
               <option value={s}>{s.toLocaleString('ru')}</option>
             ))}
           </select>
         </label>
       </div>
-      <p class="note">
-        Технический спайк M0: блок «{DEMO_ELASTOMER.name}» 40×40 мм (параметры <code>{DEMO_ELASTOMER.status}</code>)
-        налетает на жёсткий пол со скоростью 67 м/с с вращением и отскакивает. Неогуковская упругость, плоская
-        деформация, явный MLS-MPM. Гравитация не включена: за сотни микросекунд она сдвигает блок на нанометры.
-      </p>
+      <p class="note">{demo.note}</p>
     </section>
   );
 }

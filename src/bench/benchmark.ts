@@ -24,6 +24,7 @@ export interface BenchResult {
   gridNodes: number;
   /** Данные, которые шаг трогает в памяти (частицы по режиму + сетка), МБ — сравнивать с кэшем L2 */
   workingSetMB: number;
+  /** Средний Δt за замер (Δt меняется по Куранту), нс */
   dtNs: number;
   steps: number;
   seconds: number;
@@ -77,7 +78,7 @@ export async function runBenchCase(device: GPUDevice, c: BenchCase, opts: BenchO
   let sim: GpuMpm | undefined;
   try {
     const scene = benchScene(c.n);
-    Object.assign(base, { n: scene.n, dxMm: scene.dx, gridNodes: scene.gx * scene.gy, dtNs: scene.dt * 1000 });
+    Object.assign(base, { n: scene.n, dxMm: scene.dx, gridNodes: scene.gx * scene.gy, dtNs: scene.dt0 * 1000 });
     await yieldToUi();
     sim = await GpuMpm.create(device, scene, { mode: base.mode });
     base.workingSetMB = sim.workingSetBytes / 1e6;
@@ -85,6 +86,7 @@ export async function runBenchCase(device: GPUDevice, c: BenchCase, opts: BenchO
     // Прогрев: компиляция конвейеров, первые выделения памяти
     sim.step(5);
     await device.queue.onSubmittedWorkDone();
+    const simT0 = (await sim.readStep()).time;
 
     const maxSteps = opts.maxSteps ?? 1_000_000;
     let steps = 0;
@@ -105,6 +107,9 @@ export async function runBenchCase(device: GPUDevice, c: BenchCase, opts: BenchO
 
     const seconds = elapsed / 1000;
     const stepsPerSec = steps / seconds;
+    const info = await sim.readStep();
+    // Δt меняется по Куранту — берём средний за замер
+    const dtMean = (info.time - simT0) / steps;
     // Плоскости X и Y идут первыми — читаем только их
     const snapshot = await sim.readParticles(PLANE.Y + 1);
     let finite = true;
@@ -117,11 +122,12 @@ export async function runBenchCase(device: GPUDevice, c: BenchCase, opts: BenchO
       stepsPerSec,
       msPerStep: 1000 / stepsPerSec,
       mpsPerSec: (stepsPerSec * scene.n) / 1e6,
-      simUsPerSec: stepsPerSec * scene.dt,
-      wallSecFor100us: 100 / scene.dt / stepsPerSec,
-      wallSecFor300us: 300 / scene.dt / stepsPerSec,
+      dtNs: dtMean * 1000,
+      simUsPerSec: stepsPerSec * dtMean,
+      wallSecFor100us: 100 / dtMean / stepsPerSec,
+      wallSecFor300us: 300 / dtMean / stepsPerSec,
       finite,
-      fixedPointOverflow: (await sim.readStatus()) !== 0,
+      fixedPointOverflow: info.overflow,
     };
   } catch (e) {
     return { ...base, error: errorText(e) };
