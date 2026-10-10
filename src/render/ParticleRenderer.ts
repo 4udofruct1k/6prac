@@ -89,7 +89,8 @@ fn fs(in: VSOut) -> @location(0) vec4f {
       col = mix(vec3f(0.12, 0.14, 0.2), vec3f(0.35, 0.7, 1.0), -t);
     }
   } else {
-    col = inferno(clamp((in.val - V.range.x) / (V.range.y - V.range.x), 0.0, 1.0));
+    // Низ шкалы — тёмно-фиолетовый, не чёрный: недеформированный металл виден на тёмном фоне
+    col = inferno(0.15 + 0.85 * clamp((in.val - V.range.x) / (V.range.y - V.range.x), 0.0, 1.0));
   }
   return vec4f(col * (1.0 - 0.25 * r2), 1.0);
 }

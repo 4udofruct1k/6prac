@@ -1,32 +1,5 @@
-import { expect, test, type Page } from '@playwright/test';
-import type { BenchResult } from '../src/bench/benchmark';
-import type { GpuContext, GpuReport } from '../src/sim/gpu';
-import type { SelfTestReport } from '../src/sim/selftest';
-
-interface ArmorApi {
-  gpu(): Promise<GpuContext | GpuReport>;
-  runSelfTest(device: GPUDevice, steps?: number, across?: number): Promise<SelfTestReport>;
-  runBenchCase(
-    device: GPUDevice,
-    c: { id: string; label: string; n: number; mode?: 'full' | 'l2' },
-    opts: { seconds: number; maxSteps?: number },
-  ): Promise<BenchResult>;
-}
-
-declare global {
-  interface Window {
-    __armor: ArmorApi;
-  }
-}
-
-async function openApp(page: Page, query = '') {
-  const errors: string[] = [];
-  page.on('pageerror', (e) => errors.push(e.message));
-  page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
-  await page.goto('/' + query);
-  await page.waitForFunction(() => !!window.__armor);
-  return errors;
-}
+import { expect, test } from '@playwright/test';
+import { openApp } from './armor';
 
 for (const compat of [false, true]) {
   test.describe(compat ? 'режим совместимости' : 'core', () => {
@@ -78,8 +51,9 @@ for (const compat of [false, true]) {
     const stepsOf = async () => Number((await hud.innerText()).match(/шаг (\d+)/)![1]);
     const s0 = await stepsOf();
     await expect.poll(stepsOf, { timeout: 20_000 }).toBeGreaterThan(s0 + 20);
-    // На холсте есть частицы: доля пикселей заметно ярче фона. Кадр WebGPU после показа не читается
-    // из страницы, поэтому берём снимок экрана и декодируем его через <img>.
+    // На холсте есть частицы: доля пикселей, заметно отличных от фона (цвет угла холста). Не «ярче фона»:
+    // в начале удара поле ε̄p около нуля и частицы окрашены тёмным концом шкалы. Кадр WebGPU после показа
+    // не читается из страницы, поэтому берём снимок экрана и декодируем его через <img>.
     const png = (await page.locator('.viewport canvas').screenshot()).toString('base64');
     const lit = await page.evaluate(async (data) => {
       const img = new Image();
@@ -88,12 +62,15 @@ for (const compat of [false, true]) {
       const c = new OffscreenCanvas(img.width, img.height).getContext('2d')!;
       c.drawImage(img, 0, 0);
       const px = c.getImageData(0, 0, img.width, img.height).data;
+      const [r0, g0, b0] = [px[0], px[1], px[2]];
       let n = 0;
-      for (let i = 0; i < px.length; i += 4) if (px[i] + px[i + 1] + px[i + 2] > 120) n++;
+      for (let i = 0; i < px.length; i += 4) {
+        if (Math.abs(px[i] - r0) + Math.abs(px[i + 1] - g0) + Math.abs(px[i + 2] - b0) > 40) n++;
+      }
       return n / (px.length / 4);
     }, png);
     console.log(`доля пикселей частиц: ${lit.toFixed(3)}`);
-    expect(lit).toBeGreaterThan(0.01);
+    expect(lit).toBeGreaterThan(0.02);
     // Ошибки валидации и потерю устройства интерфейс выводит в .error
     await expect(page.locator('.error')).toHaveCount(0);
     expect(errors).toEqual([]);

@@ -113,6 +113,17 @@ export function signalSpeed(c: number, divV: number, L: number, c1: number, c2: 
  * за шаг — граница m·(vMax + 3·cMax), запас ×4; кинетическая энергия частиц в узле — ½·m·(vMax + 3·cMax)²,
  * запас ×4. «Градиент» массы Σ m·w·d ≤ масса узла·1,5h. Целимся в 2^30, до 2^31 — двукратный запас.
  */
+/**
+ * Граница скорости для накопителя кинетической энергии: в K входят только скорости частиц u = v + C·d,
+ * без импульса напряжений, — им не нужен запас на скорость звука. Скорость за ударом не больше скорости
+ * удара, разброс C·d в ячейке — того же порядка; 3·vMax с запасом на осколки, плюс 0,05·cMax на упругие
+ * волны в сцене без начальной скорости. Узкая граница — мелкий шаг K: разность K − ½·M·|ū|² (потеря P2G)
+ * считается без шума округления, который у узлов с малой массой иначе уходит в тепло.
+ */
+export function kineticVelocityBound(vMax: number, cMax: number): number {
+  return 3 * vMax + 0.05 * cMax;
+}
+
 export function fixedPointScales(
   maxParticleMass: number,
   ppcAxis: number,
@@ -122,11 +133,12 @@ export function fixedPointScales(
 ): { massScale: number; momScale: number; gradScale: number; kScale: number } {
   const nodeMass = ppcAxis * ppcAxis * maxParticleMass * 4;
   const vb = vMax + 3 * cMax;
+  const vk = kineticVelocityBound(vMax, cMax);
   return {
     massScale: 2 ** 30 / nodeMass,
     momScale: 2 ** 30 / (nodeMass * vb * 4),
     gradScale: 2 ** 30 / (nodeMass * 2 * h),
-    kScale: 2 ** 30 / (nodeMass * vb * vb * 2),
+    kScale: 2 ** 30 / (nodeMass * vk * vk * 2),
   };
 }
 

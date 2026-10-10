@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { kernelMaterial } from '../src/materials';
 import { T_ROOM } from '../src/materials/models';
-import { taylorScene } from '../src/scene/demos';
-import { fixedPointScales, particleMass, prepareScene } from '../src/scene/scene';
+import { taylorScene } from '../src/scene/scenes';
+import { fixedPointScales, kineticVelocityBound, particleMass, prepareScene } from '../src/scene/scene';
 import { benchSceneSpec, demoScene } from '../src/scene/scenes';
 import { GRID_PAD, PLANE, tagBody, tagField, tagMaterial } from '../src/sim/layout';
 
@@ -45,7 +45,9 @@ describe('подготовка сцены', () => {
     const { massScale, momScale, kScale } = fixedPointScales(2, 2, 1.5, 5.7, 0.5);
     expect(4 * 2 * 4 * massScale).toBeCloseTo(2 ** 30, 0);
     expect(4 * 2 * 4 * (1.5 + 3 * 5.7) * 4 * momScale).toBeCloseTo(2 ** 30, 0);
-    expect(4 * 2 * 4 * (1.5 + 3 * 5.7) ** 2 * 2 * kScale).toBeCloseTo(2 ** 30, 0);
+    // K — без импульса напряжений: граница по скоростям частиц, а не по скорости звука
+    expect(kineticVelocityBound(1.5, 5.7)).toBeCloseTo(3 * 1.5 + 0.05 * 5.7, 12);
+    expect(4 * 2 * 4 * kineticVelocityBound(1.5, 5.7) ** 2 * 2 * kScale).toBeCloseTo(2 ** 30, 0);
   });
 
   it('начальный Δt положителен и не больше Куранта по скорости звука', () => {

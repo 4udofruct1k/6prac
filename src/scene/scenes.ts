@@ -92,3 +92,15 @@ export function benchSceneSpec(n: number): SceneSpec {
 export function benchScene(n: number): PreparedScene {
   return prepareScene(benchSceneSpec(n));
 }
+
+/** Цилиндр Тейлора из Johnson & Cook 1983 (рис. 9): L0 = 25,4 мм, D0 = 7,62 мм. */
+export function taylorScene(material: string, vKmS: number, L0: number, dx: number): PreparedScene {
+  const R = 3.81;
+  return prepareScene({
+    mode: 'axisym',
+    domain: { xmin: 0, xmax: 4 * R, ymin: 0, ymax: L0 + 2 },
+    dx,
+    bodies: [{ rect: { x0: 0, y0: 0, x1: R, y1: L0 }, material, velocity: [0, -vKmS], bodyId: 0, field: 0 }],
+    bc: { left: Bc.Symmetry, right: Bc.Open, bottom: Bc.Wall, top: Bc.Open },
+  });
+}

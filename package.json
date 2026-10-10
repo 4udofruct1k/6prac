@@ -9,7 +9,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --project unit",
+    "test:gate": "vitest run --project gate",
     "test:e2e": "playwright test",
     "android:sync": "vite build && cap sync android",
     "android:open": "cap open android"

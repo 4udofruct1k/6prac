@@ -6,7 +6,7 @@ on:
 
 jobs:
   web:
-    name: Типы, юнит-тесты, e2e (WebGPU на SwiftShader)
+    name: Типы, юнит-тесты, e2e и гейт на GPU (WebGPU на SwiftShader)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,9 +27,21 @@ jobs:
           name: playwright-results
           path: test-results
 
+  gate:
+    name: Гейт вехи на CPU-эталоне (раздел 12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:gate
+
   android:
     name: Debug APK (Capacitor)
-    needs: web
+    needs: [web, gate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -71,6 +71,7 @@ export function DeviceView({
                 <th>Детерминизм</th>
                 <th>GPU ↔ CPU, положение, ячейки</th>
                 <th>GPU ↔ CPU, скорость, от v_max</th>
+                <th>GPU ↔ CPU, энергия e, от e_max</th>
                 <th>Переполнение i32</th>
                 <th>Равен полному</th>
                 <th>Итог</th>
@@ -84,6 +85,7 @@ export function DeviceView({
                   <td class={m.deterministic ? 'ok' : 'bad'}>{m.deterministic ? 'побитово' : 'различаются'}</td>
                   <td>{m.maxPositionErrorCells.toExponential(2)}</td>
                   <td>{m.maxVelocityErrorRel.toExponential(2)}</td>
+                  <td>{m.maxEnergyErrorRel.toExponential(2)}</td>
                   <td class={m.fixedPointOverflow ? 'bad' : 'ok'}>{m.fixedPointOverflow ? 'да' : 'нет'}</td>
                   <td class={m.sameAsFull === false ? 'bad' : 'ok'}>
                     {m.sameAsFull === undefined ? '—' : m.sameAsFull ? 'побитово' : 'нет'}
@@ -95,7 +97,8 @@ export function DeviceView({
           </table>
           <p class="note">
             {selfTest.steps} шагов на сцену, два прогона на режим. Допуски: положение{' '}
-            {SELFTEST_TOLERANCE.positionCells} ячейки, скорость {SELFTEST_TOLERANCE.velocityRel} от v_max.
+            {SELFTEST_TOLERANCE.positionCells} ячейки, скорость {SELFTEST_TOLERANCE.velocityRel} от v_max, энергия{' '}
+            {SELFTEST_TOLERANCE.energyRel} от e_max.
           </p>
         </div>
       )}

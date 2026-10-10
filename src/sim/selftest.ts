@@ -2,8 +2,10 @@
 // относительный допуск 1e-4) и побитовое равенство режимов хранения частиц.
 
 import { CpuMpm } from '../cpu-ref/CpuMpm';
-import { taylorScene } from '../scene/demos';
+import { kernelMaterial } from '../materials';
 import { prepareScene, type PreparedScene } from '../scene/scene';
+import { taylorScene } from '../scene/scenes';
+import { GATE_PRESETS, spallScene, spallThreshold } from '../validation/cases';
 import { GpuMpm } from './GpuMpm';
 import { Bc, PLANE, type StorageMode } from './layout';
 
@@ -16,6 +18,8 @@ export interface SelfTestCase {
   maxPositionErrorCells: number;
   /** То же для скорости, относительно максимальной скорости в сцене */
   maxVelocityErrorRel: number;
+  /** То же для удельной внутренней энергии, относительно максимальной в сцене (тепло потерь сетки) */
+  maxEnergyErrorRel: number;
   fixedPointOverflow: boolean;
   /** Режим l2: результат побитово равен полному режиму */
   sameAsFull?: boolean;
@@ -28,8 +32,8 @@ export interface SelfTestReport {
   passed: boolean;
 }
 
-/** Допуски самопроверки: положение и скорость (13 — относительный 1e-4 на малых сценах). */
-export const SELFTEST_TOLERANCE = { positionCells: 1e-3, velocityRel: 1e-3 };
+/** Допуски самопроверки: положение, скорость и внутренняя энергия (13 — относительный 1e-4 на малых сценах). */
+export const SELFTEST_TOLERANCE = { positionCells: 1e-3, velocityRel: 1e-3, energyRel: 1e-2 };
 
 const MODES: StorageMode[] = ['full', 'l2'];
 
@@ -50,6 +54,16 @@ export function selfTestScenes(): { name: string; scene: PreparedScene }[] {
       }),
     },
     { name: 'Цилиндр Тейлора, медь 190 м/с, осесимм.', scene: taylorScene('copper_ofhc', 0.19, 25.4, 0.635) },
+    // Δx пресета «ПК-Высокий»: узлы границ во float32 не попадают точно на стенку и ось — граница
+    // должна определяться по номеру узла одинаково на CPU и GPU
+    {
+      name: 'Цилиндр Тейлора, сталь 4340 343 м/с, Δx «ПК-Высокого»',
+      scene: taylorScene('steel_4340', 0.343, 6.1, GATE_PRESETS.pc_high.dx),
+    },
+    {
+      name: 'Откол меди, два поля, 1D у плоскостей симметрии',
+      scene: spallScene(GATE_PRESETS.pc_high.dx, 2 * spallThreshold(kernelMaterial('copper_ofhc'))),
+    },
   ];
 }
 
@@ -97,7 +111,11 @@ async function checkMode(
   let posErr = 0;
   let velErr = 0;
   let vMax = 0;
+  let eErr = 0;
+  let eMax = 0;
   for (let i = 0; i < n; i++) {
+    eErr = Math.max(eErr, Math.abs(a.data[PLANE.E * n + i] - cpu.get(PLANE.E, i)));
+    eMax = Math.max(eMax, Math.abs(cpu.get(PLANE.E, i)));
     posErr = Math.max(
       posErr,
       Math.abs(a.data[PLANE.X * n + i] - cpu.get(PLANE.X, i)),
@@ -112,6 +130,7 @@ async function checkMode(
   }
   const maxPositionErrorCells = posErr / scene.h;
   const maxVelocityErrorRel = velErr / vMax;
+  const maxEnergyErrorRel = eMax > 0 ? eErr / eMax : 0;
   const fixedPointOverflow = a.overflow || b.overflow;
   return {
     data: a.data,
@@ -121,12 +140,14 @@ async function checkMode(
       deterministic,
       maxPositionErrorCells,
       maxVelocityErrorRel,
+      maxEnergyErrorRel,
       fixedPointOverflow,
       passed:
         deterministic &&
         !fixedPointOverflow &&
         maxPositionErrorCells < SELFTEST_TOLERANCE.positionCells &&
-        maxVelocityErrorRel < SELFTEST_TOLERANCE.velocityRel,
+        maxVelocityErrorRel < SELFTEST_TOLERANCE.velocityRel &&
+        maxEnergyErrorRel < SELFTEST_TOLERANCE.energyRel,
     },
   };
 }

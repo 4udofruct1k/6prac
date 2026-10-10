@@ -11,7 +11,11 @@ export default defineConfig({
   define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   build: { target: 'es2022' },
   test: {
-    include: ['tests/**/*.test.ts'],
     environment: 'node',
+    // unit — быстрые тесты без GPU; gate — сценарии раздела 12 на CPU-эталоне (гейт вехи, минуты)
+    projects: [
+      { extends: true, test: { name: 'unit', include: ['tests/*.test.ts'] } },
+      { extends: true, test: { name: 'gate', include: ['tests/gate/*.test.ts'] } },
+    ],
   },
 });

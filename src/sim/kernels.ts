@@ -18,6 +18,7 @@ import {
   Bc,
   FIXED_POINT_GUARD,
   GRID_ACC_PER_FIELD,
+  GRID_PAD,
   GRID_V_STRIDE,
   MAX_MATERIALS,
   PLANE,
@@ -84,6 +85,8 @@ const TAG_REMOVED: u32 = ${TAG_REMOVED}u;
 const GUARD: i32 = ${FIXED_POINT_GUARD};
 const BC_WALL: u32 = ${Bc.Wall}u;
 const BC_SYM: u32 = ${Bc.Symmetry}u;
+// Узел GRID_PAD стоит на нижней границе области, узел g − 1 − GRID_PAD — первый на верхней или за ней
+const GRID_PAD: u32 = ${GRID_PAD}u;
 const ST_NONE: f32 = ${StrengthModel.None}.0;
 const ST_JC: f32 = ${StrengthModel.JohnsonCook}.0;
 const DM_JC: f32 = ${DamageModel.JohnsonCook}.0;
@@ -423,10 +426,16 @@ fn bcAxis(v: f32, atMin: bool, atMax: bool, bcMin: u32, bcMax: u32) -> f32 {
   return r;
 }
 
-fn applyBc(v: vec2f, xi: f32, yi: f32) -> vec2f {
+// Граница — по номеру узла, а не по координате: origin + i·h во float32 не попадает точно в границу
+fn atLeft(ix: u32) -> bool { return ix <= GRID_PAD; }
+fn atRight(ix: u32) -> bool { return ix >= P.gx - 1u - GRID_PAD; }
+fn atBottom(iy: u32) -> bool { return iy <= GRID_PAD; }
+fn atTop(iy: u32) -> bool { return iy >= P.gy - 1u - GRID_PAD; }
+
+fn applyBc(v: vec2f, ix: u32, iy: u32) -> vec2f {
   var r = vec2f(
-    bcAxis(v.x, xi <= P.xmin, xi >= P.xmax, P.bcLeft, P.bcRight),
-    bcAxis(v.y, yi <= P.ymin, yi >= P.ymax, P.bcBottom, P.bcTop),
+    bcAxis(v.x, atLeft(ix), atRight(ix), P.bcLeft, P.bcRight),
+    bcAxis(v.y, atBottom(iy), atTop(iy), P.bcBottom, P.bcTop),
   );
   if (P.lockX != 0u) {
     r.x = 0.0;
@@ -472,10 +481,21 @@ fn gridUpdate(@builtin(global_invocation_id) gid: vec3u) {
     u[2u * f] = uf.x;
     u[2u * f + 1u] = uf.y;
     let kp = f32(raw[f * ACC_N + A_K]) / P.kScale;
-    loss += max(kp - 0.5 * mf * dot(uf, uf), 0.0);
+    // Без max(…, 0): шум округления фиксированной точки здесь двусторонний, срезка превратила бы его в нагрев
+    loss += kp - 0.5 * mf * dot(uf, uf);
   }
+  let ix = id % P.gx;
+  let iy = id / P.gx;
   if (m.x > 0.0 && m.y > 0.0) {
-    let g = vec2f(f32(raw[ACC_N + A_GX] - raw[A_GX]), f32(raw[ACC_N + A_GY] - raw[A_GY])) / P.gradScale;
+    var g = vec2f(f32(raw[ACC_N + A_GX] - raw[A_GX]), f32(raw[ACC_N + A_GY] - raw[A_GY])) / P.gradScale;
+    // На плоскости симметрии нет зеркальной половины массы — составляющая поперёк плоскости ложная;
+    // в 1D (lockX) движения по x нет вовсе
+    if (P.lockX != 0u || (atLeft(ix) && P.bcLeft == BC_SYM) || (atRight(ix) && P.bcRight == BC_SYM)) {
+      g.x = 0.0;
+    }
+    if ((atBottom(iy) && P.bcBottom == BC_SYM) || (atTop(iy) && P.bcTop == BC_SYM)) {
+      g.y = 0.0;
+    }
     let len = length(g);
     if (len > 0.0) {
       let n = g / len;
@@ -485,17 +505,15 @@ fn gridUpdate(@builtin(global_invocation_id) gid: vec3u) {
       v = contact(v, m.x, m.y, n);
     }
   }
-  let xi = P.originX + f32(id % P.gx) * P.h;
-  let yi = P.originY + f32(id / P.gx) * P.h;
   for (var f = 0u; f < 2u; f++) {
     if (m[f] <= 0.0) {
       continue;
     }
     let uf = vec2f(u[2u * f], u[2u * f + 1u]);
     let ku = 0.5 * m[f] * dot(uf, uf);
-    let ub = applyBc(uf, xi, yi);
+    let ub = applyBc(uf, ix, iy);
     loss += max(ku - 0.5 * m[f] * dot(ub, ub), 0.0);
-    let vb = applyBc(vec2f(v[2u * f], v[2u * f + 1u]), xi, yi);
+    let vb = applyBc(vec2f(v[2u * f], v[2u * f + 1u]), ix, iy);
     v[2u * f] = vb.x;
     v[2u * f + 1u] = vb.y;
   }

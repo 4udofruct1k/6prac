@@ -11,10 +11,12 @@
 import { T_ROOM } from '../materials/models';
 import type { PreparedScene } from '../scene/scene';
 import { particleMass } from '../scene/scene';
+import { diagnose, type Diagnostics } from '../sim/diagnostics';
 import {
   Bc,
   FIELDS,
   GRID_ACC_PER_FIELD,
+  GRID_PAD,
   GRID_V_STRIDE,
   PLANE,
   TAG_REMOVED,
@@ -24,23 +26,11 @@ import {
 } from '../sim/layout';
 import { hasShear, pressureOf, updateMaterial, type MatState } from './physics';
 
+export type { Diagnostics };
+
 
 /** Накопители P2G поля: масса, импульс (с толчком напряжений), сам толчок, кинетическая энергия частиц, «градиент» массы. */
 const ACC = { M: 0, PX: 1, PY: 2, IX: 3, IY: 4, K: 5, GX: 6, GY: 7 } as const;
-
-export interface Diagnostics {
-  /** Кинетическая энергия частиц в счёте, Дж (плоский режим — на мм толщины, осесимм. — на радиан) */
-  kinetic: number;
-  /** Внутренняя энергия m·e частиц в счёте */
-  internal: number;
-  /** Кинетическая + внутренняя энергия удалённых частиц («ушедшая за границу») */
-  lost: number;
-  total: number;
-  mass: number;
-  momentum: [number, number];
-  centerOfMass: [number, number];
-  velocity: [number, number];
-}
 
 export class CpuMpm {
   readonly n: number;
@@ -216,13 +206,27 @@ export class CpuMpm {
         v[2 * f + 1] = py / m + this.dtCur * s.gravityY;
         u[2 * f] = ux;
         u[2 * f + 1] = uy;
-        // Потеря P2G: Σ ½·w·m·|u_p|² − ½·M·|ū|² ≥ 0 (частицы в узле движутся по-разному)
-        loss += Math.max(A(f, ACC.K, id) - 0.5 * m * (ux * ux + uy * uy), 0);
+        // Потеря P2G: Σ ½·w·m·|u_p|² − ½·M·|ū|² ≥ 0 (частицы в узле движутся по-разному). Без max(…, 0):
+        // на GPU разность считается из сумм в фиксированной точке, шум округления двусторонний, и срезка
+        // превратила бы его в систематический нагрев
+        loss += A(f, ACC.K, id) - 0.5 * m * (ux * ux + uy * uy);
       }
+      // Граница — по номеру узла, как на GPU: узел GRID_PAD стоит на нижней границе области,
+      // узел g − 1 − GRID_PAD — первый на верхней или за ней
+      const ix = id % this.gx;
+      const iy = Math.floor(id / this.gx);
+      const atL = ix <= GRID_PAD;
+      const atR = ix >= this.gx - 1 - GRID_PAD;
+      const atB = iy <= GRID_PAD;
+      const atT = iy >= this.gy - 1 - GRID_PAD;
       if (m0 > 0 && m1 > 0) {
         // Нормаль из тела 1 (снаряд) в тело 0 (мишень): Σ m·w·(x_i − x_p) смотрит из тела наружу
-        const gx = A(1, ACC.GX, id) - A(0, ACC.GX, id);
-        const gy = A(1, ACC.GY, id) - A(0, ACC.GY, id);
+        let gx = A(1, ACC.GX, id) - A(0, ACC.GX, id);
+        let gy = A(1, ACC.GY, id) - A(0, ACC.GY, id);
+        // На плоскости симметрии нет зеркальной половины массы — составляющая градиента поперёк
+        // плоскости ложная; в 1D (lockX) движения по x нет вовсе
+        if (s.lockX || (atL && s.bc.left === Bc.Symmetry) || (atR && s.bc.right === Bc.Symmetry)) gx = 0;
+        if ((atB && s.bc.bottom === Bc.Symmetry) || (atT && s.bc.top === Bc.Symmetry)) gy = 0;
         const len = Math.hypot(gx, gy);
         if (len > 0) {
           const nx = gx / len;
@@ -233,20 +237,12 @@ export class CpuMpm {
           contact(v, m0, m1, nx, ny, s.friction);
         }
       }
-      const ix = id % this.gx;
-      const iy = Math.floor(id / this.gx);
-      const xi = s.origin[0] + ix * s.h;
-      const yi = s.origin[1] + iy * s.h;
       for (let f = 0; f < 2; f++) {
         const m = f === 0 ? m0 : m1;
         if (m <= 0) continue;
         // Стенка неподвижна и работы не совершает: кинетическая энергия, которую она гасит у частиц
         // (по скорости без толчка напряжений), остаётся в теле теплом
         const ku = 0.5 * m * (u[2 * f] ** 2 + u[2 * f + 1] ** 2);
-        const atL = xi <= s.domain.xmin;
-        const atR = xi >= s.domain.xmax;
-        const atB = yi <= s.domain.ymin;
-        const atT = yi >= s.domain.ymax;
         [u[2 * f]] = applyBc(u[2 * f], atL, atR, s.bc.left, s.bc.right);
         [u[2 * f + 1]] = applyBc(u[2 * f + 1], atB, atT, s.bc.bottom, s.bc.top);
         if (s.lockX) u[2 * f] = 0;
@@ -377,44 +373,7 @@ export class CpuMpm {
 
   /** Энергии и импульс (12.2): кинетическая + внутренняя + ушедшая за границу. */
   diagnostics(): Diagnostics {
-    const { p, n } = this;
-    const mats = this.scene.materials;
-    let kinetic = 0;
-    let internal = 0;
-    let lost = 0;
-    let mass = 0;
-    let px = 0;
-    let py = 0;
-    let mx = 0;
-    let my = 0;
-    for (let i = 0; i < n; i++) {
-      const m = particleMass(mats[tagMaterial(this.tags[i])], p[this.at(PLANE.VOL0, i)]);
-      const vx = p[this.at(PLANE.VX, i)];
-      const vy = p[this.at(PLANE.VY, i)];
-      const ke = 0.5 * m * (vx * vx + vy * vy);
-      const ie = m * p[this.at(PLANE.E, i)];
-      if (tagRemoved(this.tags[i])) {
-        lost += ke + ie;
-        continue;
-      }
-      kinetic += ke;
-      internal += ie;
-      mass += m;
-      px += m * vx;
-      py += m * vy;
-      mx += m * p[this.at(PLANE.X, i)];
-      my += m * p[this.at(PLANE.Y, i)];
-    }
-    return {
-      kinetic,
-      internal,
-      lost,
-      total: kinetic + internal + lost,
-      mass,
-      momentum: [px, py],
-      centerOfMass: [mx / mass, my / mass],
-      velocity: [px / mass, py / mass],
-    };
+    return diagnose(this.scene, { n: this.n, planes: this.p, tags: this.tags });
   }
 
   /** Сдвиговая жёсткость частицы есть (не разрушена, не расплавлена). */
