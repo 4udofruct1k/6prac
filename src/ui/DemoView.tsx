@@ -32,15 +32,15 @@ export function DemoView({ gpu }: { gpu: GpuContext }) {
   const [across, setAcross] = useState(48);
   const [running, setRunning] = useState(true);
   const [viz, setViz] = useState<VizMode>(VizMode.Speed);
-  const [stepsPerFrame, setStepsPerFrame] = useState(4);
+  const [usPerFrame, setUsPerFrame] = useState(3);
   const [resetKey, setResetKey] = useState(0);
   const [hud, setHud] = useState<Hud | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const live = useRef({ running, viz, stepsPerFrame, stepOnce: false });
+  const live = useRef({ running, viz, usPerFrame, stepOnce: false });
   live.current.running = running;
   live.current.viz = viz;
-  live.current.stepsPerFrame = stepsPerFrame;
+  live.current.usPerFrame = usPerFrame;
 
   useEffect(() => {
     const canvas = canvasRef.current!;
@@ -92,7 +92,9 @@ export function DemoView({ gpu }: { gpu: GpuContext }) {
         const l = live.current;
         sim.setVizMode(l.viz);
         const encoder = device.createCommandEncoder();
-        const steps = l.running ? l.stepsPerFrame : l.stepOnce ? 1 : 0;
+        // Кадр продвигает событие на фиксированное время, а не на число шагов: шаг Δt ∝ Δx,
+        // иначе на мелкой сетке анимация идёт медленнее и выглядит иначе
+        const steps = l.running ? Math.max(1, Math.round(l.usPerFrame / sim.dt)) : l.stepOnce ? 1 : 0;
         l.stepOnce = false;
         sim.encodeSteps(encoder, steps);
         renderer.encode(encoder, sim, l.viz, VIZ[l.viz].range);
@@ -165,10 +167,10 @@ export function DemoView({ gpu }: { gpu: GpuContext }) {
           </select>
         </label>
         <label>
-          Шагов за кадр
-          <select value={stepsPerFrame} onChange={(e) => setStepsPerFrame(Number(e.currentTarget.value))}>
-            {[1, 2, 4, 8, 16, 32].map((s) => (
-              <option value={s}>{s}</option>
+          Мкс за кадр
+          <select value={usPerFrame} onChange={(e) => setUsPerFrame(Number(e.currentTarget.value))}>
+            {[0.5, 1, 2, 3, 5, 10].map((s) => (
+              <option value={s}>{s.toLocaleString('ru')}</option>
             ))}
           </select>
         </label>

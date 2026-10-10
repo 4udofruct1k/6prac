@@ -23,8 +23,11 @@ export const DEMO_OMEGA = 0.0015;
  */
 export function demoSceneSpec({ across }: DemoOptions): SceneSpec {
   const dx = DEMO_BLOCK_MM / across;
-  const x0 = 40;
-  const y0 = 25;
+  // Стенка стоит на узле (BOUNDARY_NODES − 1)·h и сдвигается с шагом сетки. Блок ставим от неё,
+  // чтобы зазор до пола (20 мм) и момент удара не зависели от разрешения.
+  const wall = (BOUNDARY_NODES - 1) * PPC_AXIS * dx;
+  const x0 = wall + 35;
+  const y0 = wall + 20;
   const halfDiag = (DEMO_BLOCK_MM / 2) * Math.SQRT2;
   const vMax = Math.hypot(...DEMO_VELOCITY) + DEMO_OMEGA * halfDiag;
   return {
