@@ -99,8 +99,8 @@ describe('Пористость (откол, 5.5)', () => {
   });
 
   it('у материала без модели пористости давление — Ми–Грюнайзен', () => {
-    const steel = kernelMaterial('steel_4340');
-    expect(steel.phi0).toBe(0);
-    expect(pressureOf(steel, 0.97, 0.3, 0, 0)).toBe(mgPressure(steel, 0.97, 0.3));
+    const w = kernelMaterial('w_alloy');
+    expect(w.phi0).toBe(0);
+    expect(pressureOf(w, 0.97, 0.3, 0, 0)).toBe(mgPressure(w, 0.97, 0.3));
   });
 });

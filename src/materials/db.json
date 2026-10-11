@@ -18,7 +18,18 @@
       "model": "jc_fracture", "D": [0.05, 3.44, -2.12, 0.002, 0.61],
       "source": "cjsm", "status": "check", "note": "D1–D3 verified, D4–D5 check"
     },
-    "spall": { "model": "none", "note": "нет данных для модели пористости — собираются" },
+    "spall": {
+      "model": "porosity",
+      "phi0": { "value": 8.19e-4, "source": "nguyen2026", "status": "tuned", "note": "Взято у меди: данных по стали нет. φ0 и Y_sat входят в порог вместе (σ_eq ∝ Y_sat·ln(1/φ0)) — Y_sat подобран при этом φ0" },
+      "Y_sat": 0.7, "eta": 0.045,
+      "phi_f": { "value": 0.25, "source": "nguyen2026", "status": "tuned", "note": "Взято у меди" },
+      "delta_c": {
+        "value": 0.0095, "source": "bless1981", "status": "tuned",
+        "note": "Как у меди: с ним на шаге игры совпадают классы табл. 11 и порог 2/4 мм"
+      },
+      "source": "bless1981", "status": "tuned",
+      "note": "Y_sat и η подобраны на шаге 0,025 мм по 4340 Rc30 (табл. 11–12, с. 80): порог отделения 2/4 мм 345 ± 10 м/с (расчёт ~349), отделение 1/5 мм между 354 и 483 м/с (~430), спад скорости тыла 198 м/с при 356 м/с (~193). Порог Гурсона σ_eq(φ0) = 2,2 ГПа по среднему напряжению — эффективное значение, а не предел текучести 4340. EOS (C0 = 3,935) занижает давление α-фазы до 13 ГПа примерно на 15 %: параметры привязаны к ней"
+    },
     "thermal": { "cp": 477, "beta": 0.9, "source": "batra", "status": "verified", "note": "β = 0,9 — спека 5.6" },
     "visual": { "color": "#8A93A6" }
   },
@@ -64,7 +75,22 @@
       "source": "jc1983", "status": "verified"
     },
     "damage": { "model": "none" },
-    "spall": { "model": "none", "note": "нет данных для модели пористости — собираются" },
+    "spall": {
+      "model": "porosity",
+      "phi0": { "value": 8.19e-4, "source": "nguyen2026", "status": "tuned", "note": "Взято у меди: данных по железу нет. φ0 и Y_sat входят в порог вместе (σ_eq ∝ Y_sat·ln(1/φ0)) — Y_sat подобран при этом φ0" },
+      "Y_sat": 0.5,
+      "eta": {
+        "value": 0.0556, "source": "seaman1975", "status": "check",
+        "note": "η = 4/3·η_SRI: в модели SRI трещины растут Ṙ/R = Δσ/(4η_SRI), объём ∝ R³ даёт φ̇/φ = 3Δσ/(4η_SRI); η_SRI = 0,0417 ГПа·мкс (табл. V). Перевод между моделями — наш"
+      },
+      "phi_f": { "value": 0.25, "source": "nguyen2026", "status": "tuned", "note": "Взято у меди" },
+      "delta_c": {
+        "value": 0.0095, "source": "bless1981", "status": "tuned",
+        "note": "Как у меди"
+      },
+      "source": "thomas2018", "status": "tuned",
+      "note": "Y_sat подобран на шаге 0,025 мм по спаду скорости тыла (табл. IV: 110 и 101 м/с при 195 и 298 м/с; расчёт 106 и 96). Армко откалывается хрупко — сколы по зёрнам, связанные вязкими перемычками (SRI): пористость здесь — объём трещин"
+    },
     "thermal": { "cp": 452, "beta": 0.9, "source": "jc1983", "status": "verified", "note": "β = 0,9 — спека 5.6" },
     "visual": { "color": "#9AA0A8" }
   },
@@ -80,7 +106,7 @@
       "source": "jc1983", "status": "verified"
     },
     "damage": { "model": "none" },
-    "spall": { "model": "none", "note": "нет данных для модели пористости — собираются" },
+    "spall": { "model": "none", "note": "Нет данных по IT180 (W–Ni–Cu); у сплавов W–Ni–Fe откольная прочность 2,3–3,8 ГПа (Zurek & Gray 1991, Zeng 1992, Escobedo 2013) при смешанном вязко-хрупком разрушении — открытый вопрос M1" },
     "thermal": { "cp": 150, "beta": 0.9, "source": "bertarelli", "status": "verified", "note": "β = 0,9 — спека 5.6" },
     "visual": { "color": "#5F6B7A" }
   },
@@ -96,7 +122,7 @@
     },
     "strength": { "model": "elastic", "source": "m0_demo", "status": "tuned" },
     "damage": { "model": "none" },
-    "spall": { "model": "none", "note": "нет данных для модели пористости — собираются" },
+    "spall": { "model": "none", "note": "Эластомеры — веха M3" },
     "thermal": { "cp": 1900, "beta": 0.9, "source": "m0_demo", "status": "tuned" },
     "visual": { "color": "#E0A04A" }
   }

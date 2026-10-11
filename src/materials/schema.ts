@@ -15,6 +15,20 @@ const sourced = {
 
 const positive = z.number().positive();
 
+/**
+ * Число группы параметров: просто число (источник и статус — у группы) или своё значение с источником,
+ * когда параметр взят из другого места, чем остальные.
+ */
+function param(value: z.ZodNumber) {
+  return z.union([value, z.object({ value, ...sourced })]);
+}
+
+export type Param = number | { value: number };
+
+export function paramValue(p: Param): number {
+  return typeof p === 'number' ? p : p.value;
+}
+
 export const MaterialRecord = z.object({
   id: z.string().regex(/^[a-z0-9_]+$/),
   name: z.string(),
@@ -57,10 +71,10 @@ export const MaterialRecord = z.object({
   spall: z.discriminatedUnion('model', [
     z.object({
       model: z.literal('porosity'),
-      phi0: z.number().positive().lt(0.1),
-      Y_sat: positive,
-      eta: positive,
-      phi_f: z.number().positive().lt(1),
+      phi0: param(z.number().positive().lt(0.1)),
+      Y_sat: param(positive),
+      eta: param(positive),
+      phi_f: param(z.number().positive().lt(1)),
       /**
        * Раскрытие разрушения δ_c, мм: откол локализуется в один ряд частиц, и сохраняется не пористость,
        * а раскрытие φ·Δx — частица разрушается при φ·Δx ≥ δ_c (полоса трещины), на мелкой сетке — при φ_f.

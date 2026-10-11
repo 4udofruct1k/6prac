@@ -275,6 +275,8 @@ export interface ShotResult {
   pullback: number;
   /** Скорость тыльной поверхности на плато, км/с */
   uMax: number;
+  /** Спад скорости тыльной поверхности u_max − u_min, км/с */
+  pullbackVelocity: number;
   t: number;
 }
 
@@ -313,17 +315,34 @@ export async function runShot(engine: Engine, Lf: number, Lt: number, history: b
   }
   let pullback = NaN;
   let uMax = NaN;
+  let pullbackVelocity = NaN;
   if (samples.length > 2) {
+    // Плато — отрезок выше 0,9 пика (на нём бывают колебания), u_max — его максимум
     const peak = Math.max(...samples.map((s) => s[1]));
-    let k = samples.findIndex((s) => s[1] >= 0.9 * peak);
-    while (k + 1 < samples.length && samples[k + 1][1] >= samples[k][1]) k++;
-    uMax = samples[k][1];
-    let uMin = uMax;
+    const k = samples.findIndex((s) => s[1] >= 0.9 * peak);
+    let j = k;
+    while (j < samples.length && samples[j][1] >= 0.9 * peak) j++;
+    uMax = Math.max(...samples.slice(k, j).map((s) => s[1]));
+    // u_min — первый минимум после плато: скорость отскакивает вверх (сигнал откола) больше чем на 5 % u_max
+    let uMin = samples[j - 1][1];
     const window = samples[k][0] + (2 * Lf) / mat.C0 + 0.5;
-    for (let j = k; j < samples.length && samples[j][0] < window; j++) uMin = Math.min(uMin, samples[j][1]);
-    pullback = 0.5 * mat.rho0 * mat.C0 * (uMax - uMin);
+    for (let q = j; q < samples.length && samples[q][0] < window; q++) {
+      if (samples[q][1] < uMin) uMin = samples[q][1];
+      else if (samples[q][1] > uMin + 0.05 * uMax) break;
+    }
+    pullbackVelocity = uMax - uMin;
+    pullback = 0.5 * mat.rho0 * mat.C0 * pullbackVelocity;
   }
-  return { separated: damaged > 0, damaged, maxPhi, openingUm: maxPhi * dx * 1000, pullback, uMax, t: snap.time };
+  return {
+    separated: damaged > 0,
+    damaged,
+    maxPhi,
+    openingUm: maxPhi * dx * 1000,
+    pullback,
+    uMax,
+    pullbackVelocity,
+    t: snap.time,
+  };
 }
 
 interface SpallShot {
@@ -332,12 +351,19 @@ interface SpallShot {
   Lf: number;
   Lt: number;
   v: number;
-  /** Отделилась ли откольная пластина в опыте */
-  separated: boolean;
+  /** Материал ударника и мишени; по умолчанию медь */
+  material?: string;
+  /** Отделилась ли откольная пластина в опыте; не задано — опыт об этом не сообщает */
+  separated?: boolean;
   label: string;
   reference: string;
   /** Опыт дал откольную прочность по спаду скорости тыльной поверхности, ГПа */
   pullback?: number;
+  /**
+   * Опыт дал сам спад скорости тыльной поверхности u_max − u_min, км/с. Для сталей сравнивается он, а не
+   * прочность: акустическая оценка ½·ρ0·C·Δu в стали ошибается до 1,74 раза (Bless 1981, с. 90).
+   */
+  pullbackVelocity?: number;
 }
 
 /** Удары медь по меди с исходом из опыта (у всех медь OFHC или чистая медь ≥ 99,99 %). */
@@ -349,6 +375,18 @@ export const SPALL_SHOTS: SpallShot[] = [
   { id: 'spall-peng-94', Lf: 3.01, Lt: 6.04, v: 0.094, separated: false, label: 'Откол меди: 3,01/6,04 мм, 94 м/с — повреждение без отделения', reference: 'Peng 2015, табл. 1: повреждение до 0,047 без отделения' },
   { id: 'spall-peng-138', Lf: 2.02, Lt: 4.05, v: 0.138, separated: false, label: 'Откол меди: 2,02/4,05 мм, 138 м/с — повреждение без отделения', reference: 'Peng 2015, табл. 1: повреждение до 0,096 без отделения' },
   { id: 'spall-thomas-308', Lf: 1.78, Lt: 4.0, v: 0.308, separated: true, pullback: 1.37, label: 'Откол меди: 1,78/4,00 мм, 308 м/с — откольная прочность', reference: 'Thomas et al. 2016, табл. 1: откольная прочность 1,37 ГПа по VISAR' },
+  // Сталь 4340 Rc30 по 4340 (Bless 1981, табл. 11–12). Удары 2/4 мм у самого порога (335 — нет, 356 — отделение)
+  // проверяет поиск порога: окно 6 % уже, чем расходятся пресеты
+  { id: 'spall-4340-233', Lf: 1.0, Lt: 5.0, v: 0.233, material: 'steel_4340', separated: false, label: 'Откол стали 4340: 1/5 мм, 233 м/с — без повреждений', reference: 'Bless 1981, табл. 11: нет повреждений' },
+  { id: 'spall-4340-320', Lf: 1.0, Lt: 5.0, v: 0.32, material: 'steel_4340', separated: false, label: 'Откол стали 4340: 1/5 мм, 320 м/с — отдельные поры', reference: 'Bless 1981, табл. 11: отдельные поры без отделения' },
+  { id: 'spall-4340-354', Lf: 1.0, Lt: 5.0, v: 0.354, material: 'steel_4340', separated: false, label: 'Откол стали 4340: 1/5 мм, 354 м/с — связанные поры', reference: 'Bless 1981, табл. 11: связанные поры без отделения' },
+  { id: 'spall-4340-483', Lf: 1.0, Lt: 5.0, v: 0.483, material: 'steel_4340', separated: true, label: 'Откол стали 4340: 1/5 мм, 483 м/с — отделение', reference: 'Bless 1981, табл. 11: откольная пластина отделилась' },
+  { id: 'spall-4340-356', Lf: 2.0, Lt: 4.0, v: 0.356, material: 'steel_4340', pullbackVelocity: 0.198, label: 'Откол стали 4340: 2/4 мм, 356 м/с — спад скорости тыла', reference: 'Bless 1981, табл. 12, выстрел 219: спад 198 ± 5 м/с по VISAR' },
+  { id: 'spall-4340-408', Lf: 2.0, Lt: 4.0, v: 0.408, material: 'steel_4340', separated: true, label: 'Откол стали 4340: 2/4 мм, 408 м/с — отделение', reference: 'Bless 1981, табл. 11, выстрел 17: откольная пластина отделилась' },
+  // Железо высокой чистоты (Thomas et al. 2018, 3,99/7,92–7,98 мм): об отделении статья не сообщает
+  { id: 'spall-fe-195', Lf: 3.99, Lt: 7.95, v: 0.195, material: 'armco_iron', pullbackVelocity: 0.11, label: 'Откол железа: 3,99/7,95 мм, 195 м/с — спад скорости тыла', reference: 'Thomas et al. 2018, табл. IV, Fe-3: спад 110 м/с' },
+  { id: 'spall-fe-298', Lf: 3.99, Lt: 7.95, v: 0.298, material: 'armco_iron', pullbackVelocity: 0.101, label: 'Откол железа: 3,99/7,95 мм, 298 м/с — спад скорости тыла', reference: 'Thomas et al. 2018, табл. IV, Fe-2: спад 101 м/с' },
+  { id: 'spall-fe-396', Lf: 3.99, Lt: 7.95, v: 0.396, material: 'armco_iron', pullbackVelocity: 0.101, label: 'Откол железа: 3,99/7,95 мм, 396 м/с — спад скорости тыла', reference: 'Thomas et al. 2018, табл. IV, Fe-1: спад 101 м/с' },
 ];
 
 /** Порог полного откола в опыте: скорость удара, км/с. */
@@ -357,6 +395,8 @@ interface SpallThreshold {
   Lf: number;
   Lt: number;
   v: number;
+  /** Материал ударника и мишени; по умолчанию медь */
+  material?: string;
   label: string;
   reference: string;
 }
@@ -364,6 +404,7 @@ interface SpallThreshold {
 export const SPALL_THRESHOLDS: SpallThreshold[] = [
   { id: 'spall-smith-3', Lf: 3.05, Lt: 6.35, v: 0.128, label: 'Порог откола меди: 3,05/6,35 мм (импульс 1,5 мкс)', reference: 'Smith 1963, табл. I: полное отделение с 128 м/с, при 122 м/с нет' },
   { id: 'spall-smith-1.5', Lf: 1.5, Lt: 6.35, v: 0.153, label: 'Порог откола меди: 1,5/6,35 мм (импульс 0,75 мкс)', reference: 'Smith 1963, табл. I: полное отделение с 153 м/с, при 147 м/с нет' },
+  { id: 'spall-4340-th', Lf: 2.0, Lt: 4.0, v: 0.345, material: 'steel_4340', label: 'Порог откола стали 4340: 2/4 мм', reference: 'Bless 1981, с. 80: 345 ± 10 м/с; табл. 11: при 335 м/с нет, при 356 м/с отделение' },
 ];
 
 function shotCase(shot: SpallShot): GateCase {
@@ -373,13 +414,23 @@ function shotCase(shot: SpallShot): GateCase {
     label: shot.label,
     reference: shot.reference,
     dx: (d) => plateDx(d, shot.Lf),
-    build: (dx) => plateShotScene(dx, shot.Lf, shot.Lt, shot.v),
+    build: (dx) => plateShotScene(dx, shot.Lf, shot.Lt, shot.v, shot.material),
     async measure(engine, { toleranceScale }): Promise<CaseOutcome> {
-      const r = await runShot(engine, shot.Lf, shot.Lt, shot.pullback !== undefined);
+      const history = shot.pullback !== undefined || shot.pullbackVelocity !== undefined;
+      const r = await runShot(engine, shot.Lf, shot.Lt, history);
       const details = { damaged: r.damaged, maxPhi: r.maxPhi, openingUm: r.openingUm, t: r.t };
+      const separationOk = shot.separated === undefined || r.separated === shot.separated;
       if (shot.pullback !== undefined) {
         const out = relOutcome(r.pullback, shot.pullback, 'ГПа', 15 * toleranceScale, { ...details, uMax: r.uMax });
-        return { ...out, passed: out.passed && r.separated === shot.separated };
+        return { ...out, passed: out.passed && separationOk };
+      }
+      if (shot.pullbackVelocity !== undefined) {
+        const out = relOutcome(r.pullbackVelocity * 1000, shot.pullbackVelocity * 1000, 'м/с', 15 * toleranceScale, {
+          ...details,
+          uMax: r.uMax,
+          separated: r.separated ? 1 : 0,
+        });
+        return { ...out, passed: out.passed && separationOk };
       }
       const value = r.separated ? 1 : 0;
       const expected = shot.separated ? 1 : 0;
@@ -405,7 +456,7 @@ function thresholdCase(th: SpallThreshold): GateCase {
     label: th.label,
     reference: th.reference,
     dx: (d) => plateDx(d, th.Lf),
-    build: (dx) => plateShotScene(dx, th.Lf, th.Lt, th.v),
+    build: (dx) => plateShotScene(dx, th.Lf, th.Lt, th.v, th.material),
     async measure(engine, { dx, toleranceScale, factory, signal }): Promise<CaseOutcome> {
       if (!factory) throw new Error('Поиск порога требует решателя для повторных прогонов');
       // Сам сценарий — удар со скоростью опыта (по нему баланс энергии 12.2)
@@ -414,7 +465,7 @@ function thresholdCase(th: SpallThreshold): GateCase {
       let hi = 1.4 * th.v;
       for (let k = 0; k < 6 && !signal?.aborted; k++) {
         const v = 0.5 * (lo + hi);
-        const e = await factory(plateShotScene(dx, th.Lf, th.Lt, v));
+        const e = await factory(plateShotScene(dx, th.Lf, th.Lt, v, th.material));
         try {
           if ((await runShot(e, th.Lf, th.Lt, false)).separated) hi = v;
           else lo = v;

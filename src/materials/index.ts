@@ -2,7 +2,7 @@
 
 import raw from './db.json';
 import { DamageModel, SpallModel, StrengthModel, type KernelMaterial } from './models';
-import { MaterialDb, type MaterialRecord } from './schema';
+import { MaterialDb, paramValue, type MaterialRecord } from './schema';
 
 export type { MaterialRecord } from './schema';
 
@@ -42,10 +42,10 @@ export function toKernel(rec: MaterialRecord): KernelMaterial {
     ...(rec.spall.model === 'porosity'
       ? {
           spall: SpallModel.Porosity,
-          phi0: rec.spall.phi0,
-          ysat: rec.spall.Y_sat,
-          etaV: rec.spall.eta,
-          phiF: rec.spall.phi_f,
+          phi0: paramValue(rec.spall.phi0),
+          ysat: paramValue(rec.spall.Y_sat),
+          etaV: paramValue(rec.spall.eta),
+          phiF: paramValue(rec.spall.phi_f),
           deltaC: rec.spall.delta_c.value,
         }
       : { spall: SpallModel.None, phi0: 0, ysat: 0, etaV: 1, phiF: 1, deltaC: 1e30 }),

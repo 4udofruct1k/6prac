@@ -47,7 +47,22 @@ export const SOURCES: Record<string, Source> = {
   bless1981: {
     title: 'Bless — Spall criteria for several metals, AFWAL-TR-81-4040 (University of Dayton Research Institute, 1981)',
     url: 'https://apps.dtic.mil/sti/pdfs/ADA112445.pdf',
-    note: 'Табл. 4, с. 37: удары Cu по Cu (OFHC, RF48) — толщины ударника и мишени, скорость, результат (нет пор / слой пор / отделение)',
+    note:
+      'Табл. 4, с. 37: удары Cu по Cu (OFHC, RF48) — толщины ударника и мишени, скорость, результат (нет пор / слой пор / отделение). ' +
+      'Табл. 11, с. 82: удары 4340 Rc30 по 4340 (1/5 и 2/4 мм) — нет повреждений / отдельные поры / связанные поры / отделение; ' +
+      'табл. 12, с. 83: VISAR, спад скорости тыла 198 ± 5 м/с при 356 м/с и 220 ± 10 м/с при 408 м/с (2/4 мм); с. 80: порог 345 ± 10 м/с (2/4 мм)',
+  },
+  thomas2018: {
+    title:
+      'Thomas, Hawkins, Matthes, Gray, Hixson — Dynamic strength properties and alpha-phase shock Hugoniot of iron and steel, J. Appl. Phys. 123, 175902 (2018)',
+    url: 'https://www.osti.gov/servlets/purl/1735933',
+    note: 'Табл. II–V: железо высокой чистоты (в табл. I — «Armco»), симметричный удар 3,99/7,92–7,98 мм при 195, 298 и 396 м/с: спад скорости тыла 110, 101 и 101 м/с (откольная прочность 1,99, 1,83, 1,85 ГПа)',
+  },
+  seaman1975: {
+    title:
+      'Seaman, Curran, Shockey et al. — Models for ductile and brittle fracture for two-dimensional wave propagation calculations, SRI для AMMRC, AD-A008992 (1975)',
+    url: 'https://apps.dtic.mil/sti/pdfs/ADA008992.pdf',
+    note: 'Табл. V, с. 57: модель SRI для армко-железа (хрупкое разрушение) — вязкость η = 417 П = 0,0417 ГПа·мкс, рост трещин Ṙ/R = Δσ/(4η)',
   },
   peng2015: {
     title: 'Peng, Pei, Li, He, Bai — Micro-damage characteristics of incipient spall in high-purity copper, Acta Phys. Sin. 64, 216201 (2015)',
