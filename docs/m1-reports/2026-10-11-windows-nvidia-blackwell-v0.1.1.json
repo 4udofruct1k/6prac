@@ -1,0 +1,85 @@
+{
+  "app": "TERMINAL",
+  "milestone": "M1",
+  "version": "0.1.1",
+  "date": "2026-10-11T06:42:35.602Z",
+  "gpu": {
+    "available": true,
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+    "native": false,
+    "platform": "web",
+    "featureLevel": "core",
+    "isFallbackAdapter": false,
+    "adapter": { "vendor": "nvidia", "architecture": "blackwell", "device": "", "description": "" },
+    "limits": {
+      "maxStorageBufferBindingSize": 2147483644,
+      "maxBufferSize": 2147483648,
+      "maxStorageBuffersPerShaderStage": 8,
+      "maxComputeInvocationsPerWorkgroup": 256,
+      "maxComputeWorkgroupSizeX": 256,
+      "maxComputeWorkgroupsPerDimension": 65535,
+      "maxStorageBuffersInVertexStage": 8,
+      "maxTextureDimension2D": 8192
+    }
+  },
+  "selfTest": {
+    "steps": 200,
+    "cases": [
+      { "scene": "Медный стержень → стальная плита, 500 м/с", "mode": "full", "deterministic": true, "maxPositionErrorCells": 0.00006264233217478932, "maxVelocityErrorRel": 0.00006883348314357273, "maxEnergyErrorRel": 0.00030339340240120974, "fixedPointOverflow": false, "passed": true },
+      { "scene": "Медный стержень → стальная плита, 500 м/с", "mode": "l2", "deterministic": true, "maxPositionErrorCells": 0.00006264233217478932, "maxVelocityErrorRel": 0.00006883348314357273, "maxEnergyErrorRel": 0.00030339340240120974, "fixedPointOverflow": false, "passed": true, "sameAsFull": true },
+      { "scene": "Цилиндр Тейлора, медь 190 м/с, осесимм.", "mode": "full", "deterministic": true, "maxPositionErrorCells": 0.00002597086289716038, "maxVelocityErrorRel": 0.00027404468959033544, "maxEnergyErrorRel": 0.0012324273509408843, "fixedPointOverflow": false, "passed": true },
+      { "scene": "Цилиндр Тейлора, медь 190 м/с, осесимм.", "mode": "l2", "deterministic": true, "maxPositionErrorCells": 0.00002597086289716038, "maxVelocityErrorRel": 0.00027404468959033544, "maxEnergyErrorRel": 0.0012324273509408843, "fixedPointOverflow": false, "passed": true, "sameAsFull": true },
+      { "scene": "Цилиндр Тейлора, сталь 4340 343 м/с, Δx «ПК-Высокого»", "mode": "full", "deterministic": true, "maxPositionErrorCells": 0.00009030490254525936, "maxVelocityErrorRel": 0.00023727425278027153, "maxEnergyErrorRel": 0.002147869217191125, "fixedPointOverflow": false, "passed": true },
+      { "scene": "Цилиндр Тейлора, сталь 4340 343 м/с, Δx «ПК-Высокого»", "mode": "l2", "deterministic": true, "maxPositionErrorCells": 0.00009030490254525936, "maxVelocityErrorRel": 0.00023727425278027153, "maxEnergyErrorRel": 0.002147869217191125, "fixedPointOverflow": false, "passed": true, "sameAsFull": true },
+      { "scene": "Откол меди, два поля, 1D у плоскостей симметрии", "mode": "full", "deterministic": true, "maxPositionErrorCells": 0.00006122079879440363, "maxVelocityErrorRel": 0.0004215781789050089, "maxEnergyErrorRel": 0.0017824953661666895, "fixedPointOverflow": false, "passed": true },
+      { "scene": "Откол меди, два поля, 1D у плоскостей симметрии", "mode": "l2", "deterministic": true, "maxPositionErrorCells": 0.00006122079879440363, "maxVelocityErrorRel": 0.0004215781789050089, "maxEnergyErrorRel": 0.0017824953661666895, "fixedPointOverflow": false, "passed": true, "sameAsFull": true }
+    ],
+    "passed": true
+  },
+  "gate": {
+    "preset": "pc_high",
+    "presetLabel": "ПК-Высокий",
+    "dx": 0.27386127875258304,
+    "toleranceScale": 1,
+    "engine": "gpu",
+    "cases": [
+      { "id": "plate-cu-4", "test": "12.1", "label": "Плоский удар медь по меди, 4 км/с", "reference": "p = ρ0(C0 + s·up)·up, up = v/2; параметры меди из базы (7.3)", "value": 122.6822198835337, "expected": 123.23400000000001, "unit": "ГПа", "error": -0.44774990381413193, "tolerance": 3, "errorUnit": "%", "passed": true, "details": { "samples": 96, "t": 1.9085772037506104 }, "energyDrift": -0.046986833135903426, "energyTolerance": 2, "energyPassed": true, "overflow": false, "n": 480, "steps": 249, "time": 1.9085772037506104, "wallSeconds": 0.02819999998807907 },
+      { "id": "taylor-cu-130", "test": "12.5", "label": "Тейлор: медь, 130 м/с, L0 = 25,4 мм", "reference": "Johnson & Cook 1983, рис. 9: L/L0 = 0,811", "value": 0.8060435700314916, "expected": 0.811, "unit": "L/L0", "error": -0.611150427682916, "tolerance": 5, "errorUnit": "%", "passed": true, "details": { "footDiameter": 1.3896510812841087, "t": 200.0155029296875 }, "energyDrift": -0.11782275375276162, "energyTolerance": 2, "energyPassed": true, "overflow": false, "n": 1196, "steps": 12490, "time": 200.0155029296875, "wallSeconds": 0.5263000000119209 },
+      { "id": "taylor-cu-146", "test": "12.5", "label": "Тейлор: медь, 146 м/с, L0 = 25,4 мм", "reference": "Johnson & Cook 1983, рис. 9: L/L0 = 0,776", "value": 0.7710372341610041, "expected": 0.776, "unit": "L/L0", "error": -0.6395316802829787, "tolerance": 5, "errorUnit": "%", "passed": true, "details": { "footDiameter": 1.5203271155256324, "t": 195.00277709960938 }, "energyDrift": -0.0836432528640913, "energyTolerance": 2, "energyPassed": true, "overflow": false, "n": 1196, "steps": 12555, "time": 195.00277709960938, "wallSeconds": 0.5213999999761582 },
+      { "id": "taylor-cu-190", "test": "12.5", "label": "Тейлор: медь, 190 м/с, L0 = 25,4 мм", "reference": "Johnson & Cook 1983, рис. 9: L/L0 = 0,678", "value": 0.6618411893630317, "expected": 0.678, "unit": "L/L0", "error": -2.383305403682645, "tolerance": 5, "errorUnit": "%", "passed": true, "details": { "footDiameter": 1.9944616958825006, "t": 180.00869750976562 }, "energyDrift": -0.08944734997668978, "energyTolerance": 2, "energyPassed": true, "overflow": false, "n": 1196, "steps": 14963, "time": 180.00869750976562, "wallSeconds": 0.6348000000119209 },
+      { "id": "taylor-armco-197", "test": "12.5", "label": "Тейлор: армко, 197 м/с, L0 = 25,4 мм", "reference": "Johnson & Cook 1983, рис. 9: L/L0 = 0,793", "value": 0.7915029488859879, "expected": 0.793, "unit": "L/L0", "error": -0.18878324262447954, "tolerance": 5, "errorUnit": "%", "passed": true, "details": { "footDiameter": 1.4719216359543073, "t": 200.00233459472656 }, "energyDrift": -0.06277353822512974, "energyTolerance": 2, "energyPassed": true, "overflow": false, "n": 1196, "steps": 14260, "time": 200.00233459472656, "wallSeconds": 0.5175999999642372 },
+      { "id": "taylor-armco-221", "test": "12.5", "label": "Тейлор: армко, 221 м/с, L0 = 25,4 мм", "reference": "Johnson & Cook 1983, рис. 9: L/L0 = 0,754", "value": 0.7537065524465182, "expected": 0.754, "unit": "L/L0", "error": -0.0389187736713259, "tolerance": 5, "errorUnit": "%", "passed": true, "details": { "footDiameter": 1.5981918700697877, "t": 200.00108337402344 }, "energyDrift": -0.07332234516057434, "energyTolerance": 2, "energyPassed": true, "overflow": false, "n": 1196, "steps": 14334, "time": 200.00108337402344, "wallSeconds": 0.6227000000476837 },
+      { "id": "taylor-armco-279", "test": "12.5", "label": "Тейлор: армко, 279 м/с, L0 = 12,6 мм", "reference": "Johnson & Cook 1983, рис. 9: L/L0 = 0,662", "value": 0.6774639649413328, "expected": 0.662, "unit": "L/L0", "error": 2.335946365760222, "tolerance": 5, "errorUnit": "%", "passed": true, "details": { "footDiameter": 1.710516682350638, "t": 95.01133728027344 }, "energyDrift": -0.18758191997786333, "energyTolerance": 2, "energyPassed": true, "overflow": false, "n": 598, "steps": 6876, "time": 95.01133728027344, "wallSeconds": 0.28539999997615817 },
+      { "id": "taylor-4340-208", "test": "12.5", "label": "Тейлор: сталь 4340, 208 м/с, L0 = 25,4 мм", "reference": "Johnson & Cook 1983, рис. 9: L/L0 = 0,885", "value": 0.8832172752075973, "expected": 0.885, "unit": "L/L0", "error": -0.20143782965001966, "tolerance": 5, "errorUnit": "%", "passed": true, "details": { "footDiameter": 1.2856174784669436, "t": 200.0117950439453 }, "energyDrift": -0.11509075545065814, "energyTolerance": 2, "energyPassed": true, "overflow": false, "n": 1196, "steps": 14044, "time": 200.0117950439453, "wallSeconds": 0.6313000000119209 },
+      { "id": "taylor-4340-282", "test": "12.5", "label": "Тейлор: сталь 4340, 282 м/с, L0 = 12,7 мм", "reference": "Johnson & Cook 1983, рис. 9: L/L0 = 0,812", "value": 0.8139734372739168, "expected": 0.812, "unit": "L/L0", "error": 0.24303414703408244, "tolerance": 5, "errorUnit": "%", "passed": true, "details": { "footDiameter": 1.4000945659734156, "t": 95.00157928466797 }, "energyDrift": -0.218709508322565, "energyTolerance": 2, "energyPassed": true, "overflow": false, "n": 598, "steps": 6755, "time": 95.00157928466797, "wallSeconds": 0.2828000000119209 },
+      { "id": "taylor-4340-343", "test": "12.5", "label": "Тейлор: сталь 4340, 343 м/с, L0 = 6,1 мм", "reference": "Johnson & Cook 1983, рис. 9: L/L0 = 0,748", "value": 0.7654088327891347, "expected": 0.748, "unit": "L/L0", "error": 2.3273840627185516, "tolerance": 5, "errorUnit": "%", "passed": true, "details": { "footDiameter": 1.346894432457009, "t": 55.00205612182617 }, "energyDrift": -0.3661803042137232, "energyTolerance": 2, "energyPassed": true, "overflow": false, "n": 286, "steps": 3892, "time": 55.00205612182617, "wallSeconds": 0.1727999999523163 },
+      { "id": "spall-cu-0.8", "test": "12.7", "label": "Откол меди: удар 0,8·v_th — без откола", "reference": "Растяжение ниже откольной прочности p_min — разрушенных частиц нет", "value": 0, "expected": 0, "unit": "частиц с D = 1", "error": 0, "tolerance": 0, "errorUnit": "шт.", "passed": true, "details": { "maxGapDx": 1.0001859066701217, "vThreshold": 0.10589681587326542, "t": 12.248318672180176 }, "energyDrift": -0.08924395172200798, "energyTolerance": 2, "energyPassed": true, "overflow": false, "n": 320, "steps": 763, "time": 12.248318672180176, "wallSeconds": 0.03370000004768372 },
+      { "id": "spall-cu-2", "test": "12.7", "label": "Откол меди: удар 2·v_th — откольная пластина", "reference": "Главная трещина на глубине толщины ударника от тыла мишени (встреча разгрузок)", "value": 5.751086853804244, "expected": 5.47722557505166, "unit": "мм от тыла", "error": 1.0000000000000029, "tolerance": 2, "errorUnit": "Δx", "passed": true, "details": { "damaged": 36, "maxGapDx": 1.7245559048706114, "vThreshold": 0.10589681587326542, "t": 12.236644744873047 }, "energyDrift": -0.39074473800545334, "energyTolerance": 2, "energyPassed": true, "overflow": false, "n": 320, "steps": 843, "time": 12.236644744873047, "wallSeconds": 0.03559999996423721 }
+    ],
+    "determinism": [
+      { "id": "taylor-cu-190", "label": "Тейлор: медь, 190 м/с, L0 = 25,4 мм", "identical": true, "differing": 0, "steps": 14963 },
+      { "id": "spall-cu-2", "label": "Откол меди: удар 2·v_th — откольная пластина", "identical": true, "differing": 0, "steps": 843 }
+    ],
+    "tests": [
+      { "test": "12.1", "title": "Плоский удар медь по меди, 4 км/с: плато давления ±3 %", "ran": true, "passed": true, "detail": "1 из 1; худшее отклонение 0,45 % при допуске 3 %" },
+      { "test": "12.2", "title": "Баланс энергии без источников: дрейф < 2 %", "ran": true, "passed": true, "detail": "12 из 12; худший дрейф 0,39 % при допуске 2 %" },
+      { "test": "12.5", "title": "Цилиндр Тейлора (медь, армко, 4340): длина ±5 %", "ran": true, "passed": true, "detail": "9 из 9; худшее отклонение 2,38 % при допуске 5 %" },
+      { "test": "12.7", "title": "Откол при плоском ударе (металлы)", "ran": true, "passed": true, "detail": "2 из 2" },
+      { "test": "12.10", "title": "Детерминизм: два прогона побитово равны", "ran": true, "passed": true, "detail": "2 из 2 сценариев побитово" }
+    ],
+    "passed": true,
+    "wallSeconds": 4.957800000011921
+  },
+  "bench": [
+    { "id": "min", "label": "Минимум", "mode": "full", "nTarget": 8000, "n": 7998, "dxMm": 1.9364916731037085, "gridNodes": 2736, "workingSetMB": 0.837672, "dtNs": 69.04792406258692, "steps": 184178, "seconds": 3.001899999976158, "stepsPerSec": 61353.80925462633, "msPerStep": 0.01629890649250268, "mpsPerSec": 490.70776641850136, "simUsPerSec": 4236.353162363881, "wallSecFor100us": 0.02360520857618964, "wallSecFor300us": 0.07081562572856892, "finite": true, "fixedPointOverflow": false },
+    { "id": "min", "label": "Минимум", "mode": "l2", "nTarget": 8000, "n": 7998, "dxMm": 1.9364916731037085, "gridNodes": 2736, "workingSetMB": 0.581736, "dtNs": 69.13288251310519, "steps": 195658, "seconds": 3.0264000000357627, "stepsPerSec": 64650.40972696535, "msPerStep": 0.015467806069957592, "mpsPerSec": 517.0739769962689, "simUsPerSec": 4469.4691800784085, "wallSecFor100us": 0.022374021605457338, "wallSecFor300us": 0.067122064816372, "finite": true, "fixedPointOverflow": false },
+    { "id": "phone", "label": "Телефон", "mode": "full", "nTarget": 25000, "n": 25080, "dxMm": 1.0954451150103321, "gridNodes": 7502, "workingSetMB": 2.536248, "dtNs": 40.84241748507096, "steps": 106032, "seconds": 3.036199999988079, "stepsPerSec": 34922.60061933217, "msPerStep": 0.028634751772937214, "mpsPerSec": 875.8588235328507, "simUsPerSec": 1426.3234341591622, "wallSecFor100us": 0.07011032533371467, "wallSecFor300us": 0.210330976001144, "finite": true, "fixedPointOverflow": false },
+    { "id": "phone", "label": "Телефон", "mode": "l2", "nTarget": 25000, "n": 25080, "dxMm": 1.0954451150103321, "gridNodes": 7502, "workingSetMB": 1.733688, "dtNs": 40.84210373346203, "steps": 106147, "seconds": 3.0286000000238418, "stepsPerSec": 35048.20709211002, "msPerStep": 0.028532129970925618, "mpsPerSec": 879.0090338701192, "simUsPerSec": 1431.442509727817, "wallSecFor100us": 0.06985959919481124, "wallSecFor300us": 0.20957879758443376, "finite": true, "fixedPointOverflow": false },
+    { "id": "pc_mid", "label": "ПК-Средний", "mode": "full", "nTarget": 120000, "n": 120000, "dxMm": 0.5, "gridNodes": 32639, "workingSetMB": 11.861676, "dtNs": 13.129062792153862, "steps": 33760, "seconds": 3.009, "stepsPerSec": 11219.674310402128, "msPerStep": 0.08912914691943127, "mpsPerSec": 1346.3609172482552, "simUsPerSec": 147.3038085287851, "wallSecFor100us": 0.6788690733713016, "wallSecFor300us": 2.036607220113905, "finite": true, "fixedPointOverflow": false },
+    { "id": "pc_mid", "label": "ПК-Средний", "mode": "l2", "nTarget": 120000, "n": 120000, "dxMm": 0.5, "gridNodes": 32639, "workingSetMB": 8.021676, "dtNs": 13.108704884308995, "steps": 34344, "seconds": 3.028100000023842, "stepsPerSec": 11341.765463402658, "msPerStep": 0.088169694852779, "mpsPerSec": 1361.0118556083191, "simUsPerSec": 148.6758563267935, "wallSecFor100us": 0.6726041636524853, "wallSecFor300us": 2.0178124909574557, "finite": true, "fixedPointOverflow": false },
+    { "id": "pc_high", "label": "ПК-Высокий", "mode": "full", "nTarget": 400000, "n": 399894, "dxMm": 0.27386127875258304, "gridNodes": 104864, "workingSetMB": 39.20052, "dtNs": 9.732399078818299, "steps": 13265, "seconds": 3.0715, "stepsPerSec": 4318.736773563405, "msPerStep": 0.23154918959668302, "mpsPerSec": 1727.0369233273645, "simUsPerSec": 42.0316697966872, "wallSecFor100us": 2.3791583937472236, "wallSecFor300us": 7.137475181241671, "finite": true, "fixedPointOverflow": false },
+    { "id": "pc_high", "label": "ПК-Высокий", "mode": "l2", "nTarget": 400000, "n": 399894, "dxMm": 0.27386127875258304, "gridNodes": 104864, "workingSetMB": 26.403912, "dtNs": 9.732335443159366, "steps": 13577, "seconds": 3.009800000011921, "stepsPerSec": 4510.930958849833, "msPerStep": 0.22168372983810272, "mpsPerSec": 1803.894224858295, "simUsPerSec": 43.9018932524591, "wallSecFor100us": 2.2778060942599248, "wallSecFor300us": 6.833418282779775, "finite": true, "fixedPointOverflow": false },
+    { "id": "pc_ultra", "label": "ПК-Ультра", "mode": "full", "nTarget": 1000000, "n": 999999, "dxMm": 0.17320508075688773, "gridNodes": 258066, "workingSetMB": 97.677468, "dtNs": 6.240372053845219, "steps": 4725, "seconds": 3.067199999988079, "stepsPerSec": 1540.492957752466, "msPerStep": 0.6491428571403343, "mpsPerSec": 1540.4914172595084, "simUsPerSec": 9.613249202703853, "wallSecFor100us": 10.40231017540601, "wallSecFor300us": 31.20693052621803, "finite": true, "fixedPointOverflow": false },
+    { "id": "pc_ultra", "label": "ПК-Ультра", "mode": "l2", "nTarget": 1000000, "n": 999999, "dxMm": 0.17320508075688773, "gridNodes": 258066, "workingSetMB": 65.6775, "dtNs": 6.153850295202038, "steps": 5597, "seconds": 3.087899999976158, "stepsPerSec": 1812.5586968629862, "msPerStep": 0.5517062712124635, "mpsPerSec": 1812.5568843042893, "simUsPerSec": 11.154214871761308, "wallSecFor100us": 8.965220873874872, "wallSecFor300us": 26.895662621624613, "finite": true, "fixedPointOverflow": false }
+  ]
+}
