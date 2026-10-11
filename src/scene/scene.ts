@@ -212,6 +212,7 @@ export function prepareScene(spec: SceneSpec): PreparedScene {
         set(PLANE.C10, i, omega);
         set(PLANE.J, i, 1);
         set(PLANE.T, i, T_ROOM);
+        set(PLANE.PHI, i, mat.phi0);
         set(PLANE.VOL0, i, vol0);
         tags[i] = packTag(mi, b.bodyId, b.field);
         maxMass = Math.max(maxMass, particleMass(mat, axisym ? Math.fround(dx * dx * rRef) : vol0));

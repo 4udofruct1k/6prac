@@ -38,10 +38,21 @@ export const SOURCES: Record<string, Source> = {
     url: 'https://arxiv.org/pdf/cond-mat/0510330',
     note: 'Раздел 3.4: C0 = 3935 м/с, Sα = 1,578 для железа по Brown et al. 2000, Γ0 = 1,69 по Gust; таблица 2: G = 81,9 ГПа (Guinan & Steinberg)',
   },
-  li_ecf19: {
-    title: 'Li et al., ECF19 — Experimental observations to the spall of metal tubes under inward sliding detonation',
-    url: 'https://gruppofrattura.it/ocs/index.php/esis/ECF19/paper/download/8963/5737',
-    note: 'Откольная прочность OFHC-меди 1,9 ГПа, «в согласии с плоскими ударами» Koller et al., J. Appl. Phys. 98, 103518 (2005)',
+  nguyen2026: {
+    title:
+      'Nguyen, Luscher, Buechler, Prime, Fensin — Reformulating a Gurson-based dynamic damage model and demonstrating improved predictive power and numerical robustness, Int. J. Solids Struct. (2026), LA-UR-25-23638',
+    url: 'https://www.osti.gov/biblio/3013803',
+    note: 'Ур. 2.6–2.18 (модифицированная Tepla: τ_r = η(1 − φ)/φ, только гидростатическая вязкость); табл. 3, с. 19: полутвёрдая медь φ0 = 8,19·10⁻⁴, Y_sat = 193 МПа, η = 6,05·10⁻⁴ Мбар·мкс, φ_f = 0,25, q1 = 1, q2 = 1,5, q3 = 2,25',
+  },
+  bless1981: {
+    title: 'Bless — Spall criteria for several metals, AFWAL-TR-81-4040 (University of Dayton Research Institute, 1981)',
+    url: 'https://apps.dtic.mil/sti/pdfs/ADA112445.pdf',
+    note: 'Табл. 4, с. 37: удары Cu по Cu (OFHC, RF48) — толщины ударника и мишени, скорость, результат (нет пор / слой пор / отделение)',
+  },
+  peng2015: {
+    title: 'Peng, Pei, Li, He, Bai — Micro-damage characteristics of incipient spall in high-purity copper, Acta Phys. Sin. 64, 216201 (2015)',
+    url: 'https://wulixb.iphy.ac.cn/en/article/doi/10.7498/aps.64.216201',
+    note: 'Табл. 1: удары Cu по Cu, толщины, скорость, длительность растяжения; повреждение без отделения (до 0,096)',
   },
   spec: {
     title: 'ARMOR_SPEC — значение задано спекой',

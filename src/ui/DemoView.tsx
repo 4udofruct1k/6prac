@@ -11,6 +11,7 @@ const VIZ_FIELDS: { mode: VizMode; label: string; unit: string }[] = [
   { mode: VizMode.Temperature, label: 'Температура (средняя по частице)', unit: 'K' },
   { mode: VizMode.PlasticStrain, label: 'Пластическая деформация ε̄p', unit: '' },
   { mode: VizMode.Damage, label: 'Повреждение D', unit: '' },
+  { mode: VizMode.Porosity, label: 'Пористость φ (откол)', unit: '' },
   { mode: VizMode.VonMises, label: 'Напряжение по Мизесу', unit: 'ГПа' },
   { mode: VizMode.Body, label: 'Тело', unit: '' },
 ];

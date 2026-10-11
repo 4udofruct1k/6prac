@@ -1,7 +1,7 @@
 // База материалов (7.6): JSON + проверка схемой при загрузке + перевод в параметры ядра.
 
 import raw from './db.json';
-import { DamageModel, StrengthModel, type KernelMaterial } from './models';
+import { DamageModel, SpallModel, StrengthModel, type KernelMaterial } from './models';
 import { MaterialDb, type MaterialRecord } from './schema';
 
 export type { MaterialRecord } from './schema';
@@ -32,7 +32,6 @@ export function toKernel(rec: MaterialRecord): KernelMaterial {
     cp: rec.thermal.cp * 1e-6,
     beta: rec.thermal.beta,
     D: rec.damage.model === 'jc_fracture' ? rec.damage.D : [0, 0, 0, 0, 0],
-    pmin: rec.spall.p_min ?? -Infinity,
     strength:
       st.model === 'johnson_cook'
         ? StrengthModel.JohnsonCook
@@ -40,6 +39,16 @@ export function toKernel(rec: MaterialRecord): KernelMaterial {
           ? StrengthModel.Elastic
           : StrengthModel.None,
     damage: rec.damage.model === 'jc_fracture' ? DamageModel.JohnsonCook : DamageModel.None,
+    ...(rec.spall.model === 'porosity'
+      ? {
+          spall: SpallModel.Porosity,
+          phi0: rec.spall.phi0,
+          ysat: rec.spall.Y_sat,
+          etaV: rec.spall.eta,
+          phiF: rec.spall.phi_f,
+          deltaC: rec.spall.delta_c.value,
+        }
+      : { spall: SpallModel.None, phi0: 0, ysat: 0, etaV: 1, phiF: 1, deltaC: 1e30 }),
   };
 }
 

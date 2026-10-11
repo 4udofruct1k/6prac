@@ -71,5 +71,5 @@ export function diagnose(scene: PreparedScene, view: ParticleView): Diagnostics 
 export function particlePressure(scene: PreparedScene, view: ParticleView, i: number): number {
   const { n, planes: p } = view;
   const mat = scene.materials[tagMaterial(view.tags[i])];
-  return pressureOf(mat, p[PLANE.J * n + i], p[PLANE.E * n + i], p[PLANE.D * n + i]);
+  return pressureOf(mat, p[PLANE.J * n + i], p[PLANE.E * n + i], p[PLANE.D * n + i], p[PLANE.PHI * n + i]);
 }

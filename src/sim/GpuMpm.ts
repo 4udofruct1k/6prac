@@ -232,8 +232,9 @@ export class GpuMpm {
           mat.G, mat.A, mat.B, mat.n,
           mat.C, mat.m, mat.Tm, mat.cp,
           mat.beta, ...mat.D.slice(0, 3),
-          ...mat.D.slice(3), Number.isFinite(mat.pmin) ? mat.pmin : -1e30, mat.strength,
-          mat.damage, etaMax, 0, 0,
+          ...mat.D.slice(3), mat.strength, mat.damage,
+          etaMax, mat.spall, mat.phi0, mat.ysat,
+          mat.etaV, mat.phiF, mat.deltaC, 0,
         ],
         PARAMS_HEADER_WORDS + m * MATERIAL_FLOATS,
       );

@@ -49,8 +49,27 @@ export const MaterialRecord = z.object({
     z.object({ model: z.literal('jc_fracture'), D: z.tuple([z.number(), z.number(), z.number(), z.number(), z.number()]), ...sourced }),
     z.object({ model: z.literal('none') }),
   ]),
-  /** Порог откола p_min, ГПа (отрицательный); null — откол по давлению не моделируется */
-  spall: z.object({ p_min: z.number().negative().nullable(), source: sourced.source.optional(), status: Status }),
+  /**
+   * Откол (5.5): модель пористости с вязким ростом пор (модифицированная Tepla, Nguyen et al. 2026).
+   * phi0 — начальная пористость, Y_sat — прочность матрицы при росте пор (ГПа), eta — вязкость роста (ГПа·мкс),
+   * phi_f — пористость разрушения. none — откол не моделируется (нет данных).
+   */
+  spall: z.discriminatedUnion('model', [
+    z.object({
+      model: z.literal('porosity'),
+      phi0: z.number().positive().lt(0.1),
+      Y_sat: positive,
+      eta: positive,
+      phi_f: z.number().positive().lt(1),
+      /**
+       * Раскрытие разрушения δ_c, мм: откол локализуется в один ряд частиц, и сохраняется не пористость,
+       * а раскрытие φ·Δx — частица разрушается при φ·Δx ≥ δ_c (полоса трещины), на мелкой сетке — при φ_f.
+       */
+      delta_c: z.object({ value: positive, ...sourced }),
+      ...sourced,
+    }),
+    z.object({ model: z.literal('none'), note: z.string().optional() }),
+  ]),
   thermal: z.object({
     /** Дж/(кг·K) */
     cp: positive,

@@ -18,6 +18,24 @@ export enum DamageModel {
   JohnsonCook = 1,
 }
 
+/** Откол (5.5): нет или пористость с вязким ростом пор и релаксацией растяжения. */
+export enum SpallModel {
+  None = 0,
+  Porosity = 1,
+}
+
+/**
+ * Константы поверхности Гурсона в модели откола (модифицированная Tepla, Nguyen et al. 2026, табл. 3:
+ * q1 = 1, q2 = 1,5, q3 = q1² — одни для меди и тантала).
+ */
+export const GURSON_Q1 = 1;
+export const GURSON_Q2 = 1.5;
+
+/** Шагов бисекции пористости: ширина ln(0,95/φ0) < 10 сходится до 10·2⁻²⁴ ≈ 6·10⁻⁷ — предел float32. */
+export const POROSITY_BISECT = 24;
+/** Верхняя граница пористости в решателе */
+export const PHI_MAX = 0.95;
+
 /** Параметры материала в единицах ядра — то, что уходит в uniform GPU. */
 export interface KernelMaterial {
   rho0: number;
@@ -35,10 +53,19 @@ export interface KernelMaterial {
   cp: number;
   beta: number;
   D: [number, number, number, number, number];
-  /** ГПа, отрицательный; -Infinity — без откола по давлению */
-  pmin: number;
   strength: StrengthModel;
   damage: DamageModel;
+  spall: SpallModel;
+  /** Откол: начальная пористость φ0 */
+  phi0: number;
+  /** Откол: прочность матрицы при росте пор Y_sat, ГПа */
+  ysat: number;
+  /** Откол: вязкость роста пор η, ГПа·мкс */
+  etaV: number;
+  /** Откол: пористость разрушения φ_f */
+  phiF: number;
+  /** Откол: раскрытие разрушения δ_c = φ·Δx, мм (регуляризация «полосой трещины» на шаге частиц) */
+  deltaC: number;
 }
 
 /** Предел сжатия для знаменателя (1 − sη)²: дальше линейная адиабата теряет смысл. */
@@ -95,6 +122,25 @@ export function jcFractureStrain(mat: KernelMaterial, triax: number, rateStar: n
   const ef =
     (D1 + D2 * Math.exp(D3 * triax)) * (1 + D4 * Math.log(Math.max(rateStar, 1))) * (1 + D5 * homologousT(mat, T));
   return Math.max(ef, 1e-3);
+}
+
+/**
+ * Порог роста пор при всестороннем растяжении (Nguyen et al. 2026, ур. 2.8 при τ = 0 и q3 = q1²):
+ * σ_eq(φ) = 2·Y_sat/(3·q2) · ln(1/(q1·φ)), ГПа, растяжение положительно. Тот же порог — для схлопывания
+ * пор при сжатии.
+ */
+export function voidThreshold(mat: KernelMaterial, phi: number): number {
+  return ((2 * mat.ysat) / (3 * GURSON_Q2)) * Math.log(1 / (GURSON_Q1 * phi));
+}
+
+/** Объём матрицы пористой частицы J_s = J·(1 − φ)/(1 − φ0): в начале J_s = 1. */
+export function matrixJ(mat: KernelMaterial, J: number, phi: number): number {
+  return (J * (1 - phi)) / (1 - mat.phi0);
+}
+
+/** Давление пористой частицы (Nguyen et al. 2026, ур. 2.7): P = (1 − φ)·P_MG(J_s, e). */
+export function porousPressure(mat: KernelMaterial, J: number, e: number, phi: number): number {
+  return (1 - phi) * mgPressure(mat, matrixJ(mat, J, phi), e);
 }
 
 /** Аналитическая ударная адиабата Us = C0 + s·up, p = ρ0·Us·up (5.1) — эталон теста 12.1. */

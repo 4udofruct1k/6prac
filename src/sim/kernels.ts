@@ -1,4 +1,4 @@
-// WGSL-ядра явного 2D MLS-MPM (раздел 4), веха M1: Ми–Грюнайзен, Джонсон–Кук с разрушением, откол,
+// WGSL-ядра явного 2D MLS-MPM (раздел 4), веха M1: Ми–Грюнайзен, Джонсон–Кук с разрушением, откол (пористость),
 // искусственная вязкость, температура, контакт двух полей, осесимметричный режим, Δt по Куранту на GPU.
 //
 // Шаг: gridUpdate (скорости полей, контакт, границы) → g2p2g (G2P этого шага, материал, перенос и сразу
@@ -27,10 +27,19 @@ import {
   VizMode,
   WORKGROUP_SIZE,
 } from './layout';
-import { DamageModel, StrengthModel, EPS_RATE_0 } from '../materials/models';
+import {
+  DamageModel,
+  EPS_RATE_0,
+  GURSON_Q1,
+  GURSON_Q2,
+  PHI_MAX,
+  POROSITY_BISECT,
+  SpallModel,
+  StrengthModel,
+} from '../materials/models';
 
-/** Material в uniform: 24 × f32 */
-export const MATERIAL_FLOATS = 24;
+/** Material в uniform: 28 × f32 (шаг массива uniform кратен 16 байтам) */
+export const MATERIAL_FLOATS = 28;
 export const PARAMS_HEADER_WORDS = 36;
 /** Размер uniform-структуры Params в байтах (должен совпадать с packParams в GpuMpm). */
 export const PARAMS_BYTES = PARAMS_HEADER_WORDS * 4 + MAX_MATERIALS * MATERIAL_FLOATS * 4;
@@ -46,8 +55,9 @@ struct Material {
   G: f32, A: f32, B: f32, n: f32,
   C: f32, m: f32, Tm: f32, cp: f32,
   beta: f32, D1: f32, D2: f32, D3: f32,
-  D4: f32, D5: f32, pmin: f32, strength: f32,
-  damage: f32, etaMax: f32, _p0: f32, _p1: f32,
+  D4: f32, D5: f32, strength: f32, damage: f32,
+  etaMax: f32, spall: f32, phi0: f32, ysat: f32,
+  etaV: f32, phiF: f32, deltaC: f32, _p0: f32,
 }
 
 struct Params {
@@ -93,6 +103,11 @@ const GRID_PAD: u32 = ${GRID_PAD}u;
 const ST_NONE: f32 = ${StrengthModel.None}.0;
 const ST_JC: f32 = ${StrengthModel.JohnsonCook}.0;
 const DM_JC: f32 = ${DamageModel.JohnsonCook}.0;
+const SP_POROSITY: f32 = ${SpallModel.Porosity}.0;
+const GURSON_Q1: f32 = ${GURSON_Q1};
+const GURSON_Q2: f32 = ${GURSON_Q2};
+const POROSITY_BISECT: i32 = ${POROSITY_BISECT};
+const PHI_MAX: f32 = ${PHI_MAX};
 const EPS_RATE_0: f32 = ${EPS_RATE_0};
 const VIZ_SPEED: u32 = ${VizMode.Speed}u;
 const VIZ_PRESSURE: u32 = ${VizMode.Pressure}u;
@@ -100,6 +115,7 @@ const VIZ_TEMPERATURE: u32 = ${VizMode.Temperature}u;
 const VIZ_EPS: u32 = ${VizMode.PlasticStrain}u;
 const VIZ_DAMAGE: u32 = ${VizMode.Damage}u;
 const VIZ_MISES: u32 = ${VizMode.VonMises}u;
+const VIZ_POROSITY: u32 = ${VizMode.Porosity}u;
 
 fn ld(plane: u32, i: u32) -> f32 {
   return part[plane * P.n + i];
@@ -152,8 +168,19 @@ fn mgPart(mat: Material, eta: f32) -> vec2f {
   return vec2f(a, da);
 }
 
-fn pressureOf(mat: Material, J: f32, e: f32, D: f32) -> f32 {
-  let p = mgPart(mat, 1.0 - J).x + mat.gamma0 * mat.rho0 * e;
+// Порог роста пор при всестороннем растяжении σ_eq(φ) (модифицированная Tepla)
+fn voidThreshold(mat: Material, phi: f32) -> f32 {
+  return (2.0 * mat.ysat) / (3.0 * GURSON_Q2) * log(1.0 / (GURSON_Q1 * phi));
+}
+
+// Объём матрицы пористой частицы J_s = J·(1 − φ)/(1 − φ0)
+fn matrixJ(mat: Material, J: f32, phi: f32) -> f32 {
+  return J * (1.0 - phi) / (1.0 - mat.phi0);
+}
+
+// EOS пористой частицы P = (1 − φ)·P_MG(J_s, e); разрушенный материал растяжения не держит
+fn pressureOf(mat: Material, J: f32, e: f32, D: f32, phi: f32) -> f32 {
+  let p = (1.0 - phi) * (mgPart(mat, 1.0 - matrixJ(mat, J, phi)).x + mat.gamma0 * mat.rho0 * e);
   if (D >= 1.0 && p < 0.0) {
     return 0.0;
   }
@@ -213,6 +240,7 @@ fn signalSpeed(c: f32, divV: f32) -> f32 {
 struct MatState {
   J: f32, sxx: f32, syy: f32, sxy: f32,
   eps: f32, e: f32, T: f32, D: f32,
+  phi: f32,
 }
 
 struct MatResult {
@@ -220,6 +248,51 @@ struct MatResult {
   p: f32,
   q: f32,
   signal: f32,
+}
+
+// Давление на конце шага при пористости φ: P = (1 − φ)·(A(η_s) + B·e), e = e* − ½·P·dv
+fn pressureAt(mat: Material, J: f32, eStar: f32, dv: f32, phi: f32) -> f32 {
+  let k = 1.0 - phi;
+  let B = mat.gamma0 * mat.rho0;
+  return k * (mgPart(mat, 1.0 - matrixJ(mat, J, phi)).x + B * eStar) / (1.0 + 0.5 * k * B * dv);
+}
+
+// Перенапряжение роста пор: растяжение сверх σ_eq(φ) открывает поры, давление сверх него схлопывает
+fn poreOverstress(mat: Material, phi: f32, p: f32, fractured: bool) -> f32 {
+  let seq = voidThreshold(mat, phi);
+  var pc = p;
+  if (fractured) {
+    pc = max(p, 0.0);
+  }
+  return max(-pc - seq, 0.0) - max(pc - seq, 0.0);
+}
+
+// Пористость на конце шага: неявный Эйлер по x = ln φ, бисекция с фиксированным числом шагов
+// (см. solvePorosity в src/cpu-ref/physics.ts)
+fn solvePorosity(mat: Material, phiN: f32, fractured: bool, dt: f32, J: f32, eStar: f32, dv: f32) -> f32 {
+  let g0 = poreOverstress(mat, phiN, pressureAt(mat, J, eStar, dv, phiN), fractured);
+  if (g0 == 0.0 || (g0 < 0.0 && phiN <= mat.phi0)) {
+    return phiN;
+  }
+  let xn = log(phiN);
+  var lo = xn;
+  var hi = log(PHI_MAX);
+  if (g0 < 0.0) {
+    lo = log(mat.phi0);
+    hi = xn;
+  }
+  let k = dt / mat.etaV;
+  for (var it = 0; it < POROSITY_BISECT; it++) {
+    let x = 0.5 * (lo + hi);
+    let phi = exp(x);
+    let r = x - xn - k * poreOverstress(mat, phi, pressureAt(mat, J, eStar, dv, phi), fractured);
+    if (r > 0.0) {
+      hi = x;
+    } else {
+      lo = x;
+    }
+  }
+  return exp(0.5 * (lo + hi));
 }
 
 // Шаг материала (4.3, шаг 5): см. updateMaterial в src/cpu-ref/physics.ts
@@ -238,9 +311,11 @@ fn updateMaterial(mat: Material, s0: MatState, c: vec4f, dzz: f32, dt: f32) -> M
   let eyy = dyy - third;
   let ezz = dzz - third;
 
-  let pOld = pressureOf(mat, Jold, s0.e, s0.D);
+  let pOld = pressureOf(mat, Jold, s0.e, s0.D, s0.phi);
   let shear = hasShear(mat, s0.D, s0.T);
-  let cOld = soundSpeed(mat, Jold, pOld, shear);
+  let cOld = soundSpeed(mat, matrixJ(mat, Jold, s0.phi), pOld, shear);
+  // Пористая частица: напряжение — доля (1 − φ) напряжения матрицы
+  let solid = 1.0 - s0.phi;
 
   let rho = mat.rho0 / J;
   var q = 0.0;
@@ -255,7 +330,7 @@ fn updateMaterial(mat: Material, s0: MatState, c: vec4f, dzz: f32, dt: f32) -> M
   var D = s0.D;
   var sigmaY = 0.0;
   if (shear) {
-    let G = mat.G;
+    let G = solid * mat.G;
     sxx = s0.sxx + dt * (2.0 * G * exx + 2.0 * w * s0.sxy);
     syy = s0.syy + dt * (2.0 * G * eyy - 2.0 * w * s0.sxy);
     sxy = s0.sxy + dt * (2.0 * G * dxy + w * (s0.syy - s0.sxx));
@@ -263,7 +338,7 @@ fn updateMaterial(mat: Material, s0: MatState, c: vec4f, dzz: f32, dt: f32) -> M
       let szz = -(sxx + syy);
       let seq = sqrt(1.5 * (sxx * sxx + syy * syy + szz * szz + 2.0 * sxy * sxy));
       let rateStar = sqrt((2.0 / 3.0) * (exx * exx + eyy * eyy + ezz * ezz + 2.0 * dxy * dxy)) / EPS_RATE_0;
-      sigmaY = jcYield(mat, s0.eps, rateStar, s0.T);
+      sigmaY = solid * jcYield(mat, s0.eps, rateStar, s0.T);
       if (seq > sigmaY) {
         dEps = (seq - sigmaY) / (3.0 * G);
         var k = 0.0;
@@ -287,11 +362,15 @@ fn updateMaterial(mat: Material, s0: MatState, c: vec4f, dzz: f32, dt: f32) -> M
   let wDev = 0.5 * ((s0.sxx + sxx) * dxx + (s0.syy + syy) * dyy + (szz0 + szz) * dzz + 2.0 * (s0.sxy + sxy) * dxy);
   let dv = (J - Jold) / mat.rho0;
   let eStar = s0.e + dt * wDev * vMid - (0.5 * pOld + q) * dv;
-  let B = mat.gamma0 * mat.rho0;
-  var p = (mgPart(mat, 1.0 - J).x + B * eStar) / (1.0 + 0.5 * B * dv);
+  // Откол (5.5): поры растут под растяжением сверх порога и разгружают его
+  var phi = s0.phi;
+  if (mat.spall == SP_POROSITY) {
+    phi = solvePorosity(mat, s0.phi, s0.D >= 1.0, dt, J, eStar, dv);
+  }
+  var p = pressureAt(mat, J, eStar, dv, phi);
   var e = eStar - 0.5 * p * dv;
-
-  if (p < mat.pmin) {
+  // Разрушение: φ ≥ φ_f или раскрытие φ·Δx ≥ δ_c
+  if (mat.spall == SP_POROSITY && (phi >= mat.phiF || phi * P.dx >= mat.deltaC)) {
     D = 1.0;
   }
   if (D >= 1.0) {
@@ -304,12 +383,15 @@ fn updateMaterial(mat: Material, s0: MatState, c: vec4f, dzz: f32, dt: f32) -> M
     }
   }
 
-  let heat = mat.beta * sigmaY * dEps / rho + q * max(-dv, 0.0);
+  // Температура: доля β пластической работы (сдвиг и рост/схлопывание пор) + нагрев вязкостью
+  let dPhi = phi - s0.phi;
+  let poreWork = (max(-p, 0.0) * max(dPhi, 0.0) + max(p, 0.0) * max(-dPhi, 0.0)) / (1.0 - phi);
+  let heat = mat.beta * (sigmaY * dEps + poreWork) / rho + q * max(-dv, 0.0);
   let T = s0.T + heat / mat.cp;
 
-  let cNew = soundSpeed(mat, J, p, hasShear(mat, D, T));
+  let cNew = soundSpeed(mat, matrixJ(mat, J, phi), p, hasShear(mat, D, T));
   var r: MatResult;
-  r.s = MatState(J, sxx, syy, sxy, s0.eps + dEps, e, T, D);
+  r.s = MatState(J, sxx, syy, sxy, s0.eps + dEps, e, T, D, phi);
   r.p = p;
   r.q = q;
   r.signal = signalSpeed(cNew, trD);
@@ -402,7 +484,7 @@ fn p2g(@builtin(global_invocation_id) gid: vec3u) {
   }
   let mat = P.mats[tag & 0xffu];
   let J = ld(P_J, i);
-  let pr = pressureOf(mat, J, ld(P_E, i), ld(P_D, i));
+  let pr = pressureOf(mat, J, ld(P_E, i), ld(P_D, i), ld(P_PHI, i));
   scatter(
     i, tag,
     vec2f(ld(P_X, i), ld(P_Y, i)),
@@ -598,6 +680,7 @@ fn g2p2g(@builtin(global_invocation_id) gid: vec3u) {
   let s0 = MatState(
     ld(P_J, i), ld(P_SXX, i), ld(P_SYY, i), ld(P_SXY, i),
     ld(P_EPS, i), ld(P_E, i) + heat, ld(P_T, i) + heat / mat.cp, ld(P_D, i),
+    ld(P_PHI, i),
   );
   let r = updateMaterial(mat, s0, c, dzz, dt);
 
@@ -612,6 +695,7 @@ fn g2p2g(@builtin(global_invocation_id) gid: vec3u) {
   st(P_E, i, r.s.e);
   st(P_T, i, r.s.T);
   st(P_D, i, r.s.D);
+  st(P_PHI, i, r.s.phi);
 
   let margin = 1.5 * P.h;
   let out = nx.x < P.xmin - margin || nx.x > P.xmax + margin || nx.y < P.ymin - margin || nx.y > P.ymax + margin;
@@ -629,6 +713,7 @@ fn g2p2g(@builtin(global_invocation_id) gid: vec3u) {
       case VIZ_TEMPERATURE: { viz = r.s.T; }
       case VIZ_EPS: { viz = r.s.eps; }
       case VIZ_DAMAGE: { viz = r.s.D; }
+      case VIZ_POROSITY: { viz = r.s.phi; }
       case VIZ_MISES: {
         let szz = -(r.s.sxx + r.s.syy);
         viz = sqrt(1.5 * (r.s.sxx * r.s.sxx + r.s.syy * r.s.syy + szz * szz + 2.0 * r.s.sxy * r.s.sxy));

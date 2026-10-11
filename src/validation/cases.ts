@@ -2,13 +2,13 @@
 // Метрики считаются по снимку частиц, поэтому одинаковы для CPU-эталона и GPU.
 
 import { kernelMaterial } from '../materials';
-import { hugoniot, type KernelMaterial } from '../materials/models';
+import { hugoniot } from '../materials/models';
 import { REFERENCE_SCENE_MM, particleSpacing, QUALITY_PRESETS } from '../scene/presets';
 import { prepareScene, type PreparedScene } from '../scene/scene';
 import { taylorScene } from '../scene/scenes';
 import { particlePressure } from '../sim/diagnostics';
 import { Bc, PLANE, tagBody, tagRemoved } from '../sim/layout';
-import type { Engine, Snapshot } from './engine';
+import type { Engine, EngineFactory, Snapshot } from './engine';
 
 export type GateTestId = '12.1' | '12.2' | '12.5' | '12.7' | '12.10';
 export type GatePresetId = 'pc_high' | 'phone';
@@ -49,6 +49,8 @@ export interface MeasureContext {
   dx: number;
   toleranceScale: number;
   signal?: AbortSignal;
+  /** Решатель для дополнительных прогонов сценария (поиск порога) */
+  factory?: EngineFactory;
 }
 
 export interface GateCase {
@@ -59,6 +61,8 @@ export interface GateCase {
   reference: string;
   build(dx: number): PreparedScene;
   measure(engine: Engine, ctx: MeasureContext): Promise<CaseOutcome>;
+  /** Шаг частиц сценария по шагу пресета (по умолчанию — шаг пресета) */
+  dx?(presetDx: number): number;
 }
 
 function relOutcome(value: number, expected: number, unit: string, tolPct: number, details?: Record<string, number>): CaseOutcome {
@@ -231,117 +235,198 @@ function taylorCase(ref: TaylorRef): GateCase {
 
 // ---------- 12.7: откол при плоском ударе (металлы) ----------
 
-const SPALL_FLYER_DX = 20;
-const SPALL_TARGET_DX = 60;
 export const SPALL_MATERIAL = 'copper_ofhc';
 
-/**
- * Скорость симметричного удара, при которой амплитуда волны равна откольной прочности:
- * ρ0·(C0 + s·up)·up = |p_min|, v = 2·up. Встречные волны разгрузки дают растяжение той же амплитуды.
- */
-export function spallThreshold(mat: KernelMaterial): number {
-  let up = 0;
-  for (let k = 0; k < 60; k++) up = -mat.pmin / (mat.rho0 * (mat.C0 + mat.s * up));
-  return 2 * up;
+/** Шаг для плоских ударов: тоньше толщины ударника / 6 пластину не разрешить. */
+function plateDx(presetDx: number, flyer: number): number {
+  return Math.min(presetDx, flyer / 6);
 }
 
 /**
- * Ударник 20Δx и мишень 60Δx из меди в разных полях контакта: контакт не держит растяжение, ударник
- * отлетает, как в опыте. Разгрузки с тыла мишени и с тыла ударника встречаются на глубине толщины ударника.
+ * Симметричный удар (1D: lockX, плоскости симметрии по бокам): мишень Lt на тыльной поверхности y = 0,
+ * ударник Lf летит на неё со скоростью v. Тела в разных полях контакта: контакт не держит растяжение,
+ * ударник отлетает, как в опыте. Толщины округляются до целого числа частиц.
  */
-export function spallScene(dx: number, v: number, material = SPALL_MATERIAL): PreparedScene {
+export function plateShotScene(dx: number, Lf: number, Lt: number, v: number, material = SPALL_MATERIAL): PreparedScene {
   const h = 2 * dx;
-  const Lt = SPALL_TARGET_DX * dx;
-  const Lf = SPALL_FLYER_DX * dx;
+  const lt = Math.round(Lt / dx) * dx;
+  const lf = Math.round(Lf / dx) * dx;
   return prepareScene({
     mode: 'plane',
-    domain: { xmin: 0, xmax: 2 * h, ymin: -10 * dx, ymax: Lt + Lf + 10 * dx },
+    domain: { xmin: 0, xmax: 2 * h, ymin: -20 * dx, ymax: lt + lf + 20 * dx },
     dx,
     lockX: true,
     bodies: [
-      { rect: { x0: 0, y0: 0, x1: 2 * h, y1: Lt }, material, velocity: [0, 0], bodyId: 0, field: 0 },
-      { rect: { x0: 0, y0: Lt, x1: 2 * h, y1: Lt + Lf }, material, velocity: [0, -v], bodyId: 1, field: 1 },
+      { rect: { x0: 0, y0: 0, x1: 2 * h, y1: lt }, material, velocity: [0, 0], bodyId: 0, field: 0 },
+      { rect: { x0: 0, y0: lt, x1: 2 * h, y1: lt + lf }, material, velocity: [0, -v], bodyId: 1, field: 1 },
     ],
     bc: { left: Bc.Symmetry, right: Bc.Symmetry, bottom: Bc.Open, top: Bc.Open },
   });
 }
 
-/**
- * Откол в мишени по снимку: число разрушенных частиц (D ≥ 1) и главная трещина — наибольший зазор
- * между соседними слоями частиц (слой — частицы с одной начальной высотой). Глубина трещины — начальная
- * высота между этими слоями, от тыльной поверхности мишени (y = 0). Так в опыте меряют толщину откольной
- * пластины; середина зоны повреждения сдвигается с амплитудой удара, а трещина — нет.
- */
-export function spallCrack(engine: Engine, snap: Snapshot, dx: number): { damaged: number; depth: number; gap: number } {
-  const rows = new Map<number, { y: number; k: number }>();
-  let damaged = 0;
-  for (let i = 0; i < snap.n; i++) {
-    if (tagBody(snap.tags[i]) !== 0 || tagRemoved(snap.tags[i])) continue;
-    if (snap.planes[PLANE.D * snap.n + i] >= 1) damaged++;
-    const row = Math.round(initialY(engine, i) / dx - 0.5);
-    const r = rows.get(row) ?? { y: 0, k: 0 };
-    r.y += snap.planes[PLANE.Y * snap.n + i];
-    r.k++;
-    rows.set(row, r);
-  }
-  const ids = [...rows.keys()].sort((a, b) => a - b);
-  let gap = 0;
-  let depth = NaN;
-  for (let k = 1; k < ids.length; k++) {
-    const lo = rows.get(ids[k - 1])!;
-    const hi = rows.get(ids[k])!;
-    const g = hi.y / hi.k - lo.y / lo.k;
-    if (g > gap) {
-      gap = g;
-      depth = (ids[k - 1] + ids[k] + 1) * 0.5 * dx;
-    }
-  }
-  return { damaged, depth, gap: gap / dx };
+export interface ShotResult {
+  /** В мишени есть разрушенные частицы (D = 1) — откольная пластина отделилась */
+  separated: boolean;
+  damaged: number;
+  /** Наибольшая пористость в мишени и раскрытие φ·Δx, мкм */
+  maxPhi: number;
+  openingUm: number;
+  /** Откольная прочность по спаду скорости тыльной поверхности ½·ρ0·C0·Δu, ГПа (NaN — без истории) */
+  pullback: number;
+  /** Скорость тыльной поверхности на плато, км/с */
+  uMax: number;
+  t: number;
 }
 
-function spallCase(factor: number): GateCase {
-  const spall = factor > 1;
+/**
+ * Прогон удара: до 2,6·(Lt + Lf)/C0 — встреча разгрузок и раскрытие трещины. С history — скорость тыльной
+ * поверхности (ряд частиц у y = 0) каждые 0,01 мкс и откольная прочность по ней, как в опыте:
+ * σ = ½·ρ0·C0·(u_max − u_min), u_min — первый минимум после плато.
+ */
+export async function runShot(engine: Engine, Lf: number, Lt: number, history: boolean): Promise<ShotResult> {
+  const scene = engine.scene;
+  const mat = scene.materials[0];
+  const dx = scene.dx;
+  const n = scene.n;
+  const tEnd = (2.6 * (Lt + Lf)) / mat.C0;
+  let snap = await engine.snapshot();
+  const rear: number[] = [];
+  for (let i = 0; i < n; i++) if (tagBody(snap.tags[i]) === 0 && initialY(engine, i) < dx) rear.push(i);
+  const samples: [number, number][] = [];
+  if (history) {
+    for (let t = 0.01; t < tEnd; t += 0.01) {
+      await engine.runTo(t);
+      snap = await engine.snapshot();
+      let u = 0;
+      for (const i of rear) u -= snap.planes[PLANE.VY * n + i];
+      samples.push([snap.time, u / rear.length]);
+    }
+  }
+  await engine.runTo(tEnd);
+  snap = await engine.snapshot();
+  let damaged = 0;
+  let maxPhi = 0;
+  for (let i = 0; i < n; i++) {
+    if (tagBody(snap.tags[i]) !== 0) continue;
+    if (snap.planes[PLANE.D * n + i] >= 1) damaged++;
+    maxPhi = Math.max(maxPhi, snap.planes[PLANE.PHI * n + i]);
+  }
+  let pullback = NaN;
+  let uMax = NaN;
+  if (samples.length > 2) {
+    const peak = Math.max(...samples.map((s) => s[1]));
+    let k = samples.findIndex((s) => s[1] >= 0.9 * peak);
+    while (k + 1 < samples.length && samples[k + 1][1] >= samples[k][1]) k++;
+    uMax = samples[k][1];
+    let uMin = uMax;
+    const window = samples[k][0] + (2 * Lf) / mat.C0 + 0.5;
+    for (let j = k; j < samples.length && samples[j][0] < window; j++) uMin = Math.min(uMin, samples[j][1]);
+    pullback = 0.5 * mat.rho0 * mat.C0 * (uMax - uMin);
+  }
+  return { separated: damaged > 0, damaged, maxPhi, openingUm: maxPhi * dx * 1000, pullback, uMax, t: snap.time };
+}
+
+interface SpallShot {
+  id: string;
+  /** Толщины ударника и мишени, мм; скорость, км/с */
+  Lf: number;
+  Lt: number;
+  v: number;
+  /** Отделилась ли откольная пластина в опыте */
+  separated: boolean;
+  label: string;
+  reference: string;
+  /** Опыт дал откольную прочность по спаду скорости тыльной поверхности, ГПа */
+  pullback?: number;
+}
+
+/** Удары медь по меди с исходом из опыта (у всех медь OFHC или чистая медь ≥ 99,99 %). */
+export const SPALL_SHOTS: SpallShot[] = [
+  { id: 'spall-bless-80', Lf: 1.5, Lt: 4.0, v: 0.08, separated: false, label: 'Откол меди: 1,5/4,0 мм, 80 м/с — без пор', reference: 'Bless 1981, табл. 4: нет пор' },
+  { id: 'spall-bless-103', Lf: 1.45, Lt: 3.9, v: 0.103, separated: false, label: 'Откол меди: 1,45/3,9 мм, 103 м/с — слой пор', reference: 'Bless 1981, табл. 4: слой пор без отделения' },
+  { id: 'spall-bless-168', Lf: 2.0, Lt: 4.0, v: 0.168, separated: true, label: 'Откол меди: 2,0/4,0 мм, 168 м/с — отделение', reference: 'Bless 1981, табл. 4: откольная пластина отделилась' },
+  { id: 'spall-bless-244', Lf: 1.45, Lt: 4.0, v: 0.244, separated: true, label: 'Откол меди: 1,45/4,0 мм, 244 м/с — отделение', reference: 'Bless 1981, табл. 4: откольная пластина отделилась' },
+  { id: 'spall-peng-94', Lf: 3.01, Lt: 6.04, v: 0.094, separated: false, label: 'Откол меди: 3,01/6,04 мм, 94 м/с — повреждение без отделения', reference: 'Peng 2015, табл. 1: повреждение до 0,047 без отделения' },
+  { id: 'spall-peng-138', Lf: 2.02, Lt: 4.05, v: 0.138, separated: false, label: 'Откол меди: 2,02/4,05 мм, 138 м/с — повреждение без отделения', reference: 'Peng 2015, табл. 1: повреждение до 0,096 без отделения' },
+  { id: 'spall-thomas-308', Lf: 1.78, Lt: 4.0, v: 0.308, separated: true, pullback: 1.37, label: 'Откол меди: 1,78/4,00 мм, 308 м/с — откольная прочность', reference: 'Thomas et al. 2016, табл. 1: откольная прочность 1,37 ГПа по VISAR' },
+];
+
+/** Порог полного откола в опыте: скорость удара, км/с. */
+interface SpallThreshold {
+  id: string;
+  Lf: number;
+  Lt: number;
+  v: number;
+  label: string;
+  reference: string;
+}
+
+export const SPALL_THRESHOLDS: SpallThreshold[] = [
+  { id: 'spall-smith-3', Lf: 3.05, Lt: 6.35, v: 0.128, label: 'Порог откола меди: 3,05/6,35 мм (импульс 1,5 мкс)', reference: 'Smith 1963, табл. I: полное отделение с 128 м/с, при 122 м/с нет' },
+  { id: 'spall-smith-1.5', Lf: 1.5, Lt: 6.35, v: 0.153, label: 'Порог откола меди: 1,5/6,35 мм (импульс 0,75 мкс)', reference: 'Smith 1963, табл. I: полное отделение с 153 м/с, при 147 м/с нет' },
+];
+
+function shotCase(shot: SpallShot): GateCase {
   return {
-    id: `spall-cu-${factor}`,
+    id: shot.id,
     test: '12.7',
-    label: `Откол меди: удар ${factor.toLocaleString('ru')}·v_th — ${spall ? 'откольная пластина' : 'без откола'}`,
-    reference: spall
-      ? 'Главная трещина на глубине толщины ударника от тыла мишени (встреча разгрузок)'
-      : 'Растяжение ниже откольной прочности p_min — разрушенных частиц нет',
-    build: (dx) => spallScene(dx, factor * spallThreshold(kernelMaterial(SPALL_MATERIAL))),
-    async measure(engine, { dx, toleranceScale }): Promise<CaseOutcome> {
-      const mat = kernelMaterial(SPALL_MATERIAL);
-      // Встреча разгрузок около (Lt + Lf)/C0; с запасом, чтобы трещина успела раскрыться
-      await engine.runTo((2.2 * (SPALL_TARGET_DX + SPALL_FLYER_DX) * dx) / mat.C0);
-      const snap = await engine.snapshot();
-      const { damaged, depth, gap } = spallCrack(engine, snap, dx);
-      const vth = spallThreshold(mat);
-      if (!spall) {
-        return {
-          value: damaged,
-          expected: 0,
-          unit: 'частиц с D = 1',
-          error: damaged,
-          tolerance: 0,
-          errorUnit: 'шт.',
-          passed: damaged === 0,
-          details: { maxGapDx: gap, vThreshold: vth, t: snap.time },
-        };
+    label: shot.label,
+    reference: shot.reference,
+    dx: (d) => plateDx(d, shot.Lf),
+    build: (dx) => plateShotScene(dx, shot.Lf, shot.Lt, shot.v),
+    async measure(engine, { toleranceScale }): Promise<CaseOutcome> {
+      const r = await runShot(engine, shot.Lf, shot.Lt, shot.pullback !== undefined);
+      const details = { damaged: r.damaged, maxPhi: r.maxPhi, openingUm: r.openingUm, t: r.t };
+      if (shot.pullback !== undefined) {
+        const out = relOutcome(r.pullback, shot.pullback, 'ГПа', 15 * toleranceScale, { ...details, uMax: r.uMax });
+        return { ...out, passed: out.passed && r.separated === shot.separated };
       }
-      const expected = SPALL_FLYER_DX * dx;
-      const error = (depth - expected) / dx;
-      const tolerance = 2 * toleranceScale;
+      const value = r.separated ? 1 : 0;
+      const expected = shot.separated ? 1 : 0;
       return {
-        value: depth,
+        value,
         expected,
-        unit: 'мм от тыла',
-        error,
-        tolerance,
-        errorUnit: 'Δx',
-        // Трещина раскрыта: зазор между слоями заметно больше шага частиц
-        passed: damaged > 0 && gap > 1.25 && Math.abs(error) <= tolerance,
-        details: { damaged, maxGapDx: gap, vThreshold: vth, t: snap.time },
+        unit: 'отделение (1 — есть)',
+        error: value - expected,
+        tolerance: 0,
+        errorUnit: 'шт.',
+        passed: value === expected,
+        details,
       };
+    },
+  };
+}
+
+/** Поиск порога отделения: 6 делений пополам между 0,6 и 1,4 скорости опыта (шаг ~1,3 %). */
+function thresholdCase(th: SpallThreshold): GateCase {
+  return {
+    id: th.id,
+    test: '12.7',
+    label: th.label,
+    reference: th.reference,
+    dx: (d) => plateDx(d, th.Lf),
+    build: (dx) => plateShotScene(dx, th.Lf, th.Lt, th.v),
+    async measure(engine, { dx, toleranceScale, factory, signal }): Promise<CaseOutcome> {
+      if (!factory) throw new Error('Поиск порога требует решателя для повторных прогонов');
+      // Сам сценарий — удар со скоростью опыта (по нему баланс энергии 12.2)
+      const atExp = await runShot(engine, th.Lf, th.Lt, false);
+      let lo = 0.6 * th.v;
+      let hi = 1.4 * th.v;
+      for (let k = 0; k < 6 && !signal?.aborted; k++) {
+        const v = 0.5 * (lo + hi);
+        const e = await factory(plateShotScene(dx, th.Lf, th.Lt, v));
+        try {
+          if ((await runShot(e, th.Lf, th.Lt, false)).separated) hi = v;
+          else lo = v;
+        } finally {
+          e.destroy();
+        }
+      }
+      const vth = 0.5 * (lo + hi);
+      return relOutcome(vth * 1000, th.v * 1000, 'м/с', 10 * toleranceScale, {
+        separatedAtExperiment: atExp.separated ? 1 : 0,
+        openingUmAtExperiment: atExp.openingUm,
+      });
     },
   };
 }
@@ -349,8 +434,8 @@ function spallCase(factor: number): GateCase {
 export const GATE_CASES: GateCase[] = [
   plateCase,
   ...TAYLOR_REFS.map(taylorCase),
-  spallCase(0.8),
-  spallCase(2),
+  ...SPALL_SHOTS.map(shotCase),
+  ...SPALL_THRESHOLDS.map(thresholdCase),
 ];
 
 export function gateCase(id: string): GateCase {

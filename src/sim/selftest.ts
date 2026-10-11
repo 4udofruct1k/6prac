@@ -2,10 +2,9 @@
 // относительный допуск 1e-4) и побитовое равенство режимов хранения частиц.
 
 import { CpuMpm } from '../cpu-ref/CpuMpm';
-import { kernelMaterial } from '../materials';
 import { prepareScene, type PreparedScene } from '../scene/scene';
 import { taylorScene } from '../scene/scenes';
-import { GATE_PRESETS, spallScene, spallThreshold } from '../validation/cases';
+import { GATE_PRESETS, plateShotScene } from '../validation/cases';
 import { GpuMpm } from './GpuMpm';
 import { Bc, PLANE, type StorageMode } from './layout';
 
@@ -62,7 +61,8 @@ export function selfTestScenes(): { name: string; scene: PreparedScene }[] {
     },
     {
       name: 'Откол меди, два поля, 1D у плоскостей симметрии',
-      scene: spallScene(GATE_PRESETS.pc_high.dx, 2 * spallThreshold(kernelMaterial('copper_ofhc'))),
+      // Bless 1981: медь 2,0 мм на 4,0 мм при 168 м/с — пористость, откол, контакт полей
+      scene: plateShotScene(GATE_PRESETS.pc_high.dx, 2.0, 4.0, 0.168),
     },
   ];
 }

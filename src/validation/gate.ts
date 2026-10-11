@@ -66,13 +66,13 @@ export interface GateOptions {
   onStatus?(text: string): void;
 }
 
-export const DEFAULT_DETERMINISM = ['spall-cu-2', 'taylor-cu-190'];
+export const DEFAULT_DETERMINISM = ['spall-bless-168', 'taylor-cu-190'];
 
 export const GATE_TESTS: { test: GateTestId; title: string }[] = [
   { test: '12.1', title: 'Плоский удар медь по меди, 4 км/с: плато давления ±3 %' },
   { test: '12.2', title: 'Баланс энергии без источников: дрейф < 2 %' },
   { test: '12.5', title: 'Цилиндр Тейлора (медь, армко, 4340): длина ±5 %' },
-  { test: '12.7', title: 'Откол при плоском ударе (металлы)' },
+  { test: '12.7', title: 'Откол при плоском ударе (металлы): опыты Bless, Peng, Thomas, Smith' },
   { test: '12.10', title: 'Детерминизм: два прогона побитово равны' },
 ];
 
@@ -94,9 +94,11 @@ export async function runGateCase(
   const base = { id: c.id, test: c.test, label: c.label, reference: c.reference };
   let engine: Engine | undefined;
   try {
-    engine = await factory(c.build(preset.dx));
+    // Сценарий может считать мельче пресета (тонкие пластины 12.7 — не грубее толщины ударника / 6)
+    const dx = c.dx ? c.dx(preset.dx) : preset.dx;
+    engine = await factory(c.build(dx));
     const e0 = energyOf(engine, await engine.snapshot());
-    const outcome = await c.measure(engine, { dx: preset.dx, toleranceScale: preset.toleranceScale, signal });
+    const outcome = await c.measure(engine, { dx, toleranceScale: preset.toleranceScale, signal, factory });
     const snapshot = await engine.snapshot();
     const drift = ((energyOf(engine, snapshot) - e0) / e0) * 100;
     const energyTolerance = 2 * preset.toleranceScale;

@@ -35,6 +35,7 @@ export const DEMOS: DemoScenario[] = [
       [VizMode.Temperature]: [293, 600],
       [VizMode.PlasticStrain]: [0, 2],
       [VizMode.Damage]: [0, 1],
+      [VizMode.Porosity]: [0, 0.05],
       [VizMode.VonMises]: [0, 0.4],
     },
     defaultViz: VizMode.PlasticStrain,

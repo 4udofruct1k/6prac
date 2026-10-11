@@ -77,7 +77,13 @@ export class CpuMpm {
       for (let i = 0; i < this.n; i++) {
         if (tagRemoved(this.tags[i])) continue;
         const mat = this.scene.materials[tagMaterial(this.tags[i])];
-        const pr = pressureOf(mat, this.get(PLANE.J, i), this.get(PLANE.E, i), this.get(PLANE.D, i));
+        const pr = pressureOf(
+          mat,
+          this.get(PLANE.J, i),
+          this.get(PLANE.E, i),
+          this.get(PLANE.D, i),
+          this.get(PLANE.PHI, i),
+        );
         this.scatter(
           i,
           this.get(PLANE.X, i),
@@ -316,8 +322,9 @@ export class CpuMpm {
         e: p[this.at(PLANE.E, i)] + heat,
         T: p[this.at(PLANE.T, i)] + heat / mat.cp,
         D: p[this.at(PLANE.D, i)],
+        phi: p[this.at(PLANE.PHI, i)],
       };
-      const r = updateMaterial(mat, s0, C, dzz, dt, s.h, s.c1, s.c2);
+      const r = updateMaterial(mat, s0, C, dzz, dt, s.h, s.c1, s.c2, s.dx);
 
       const nx = x + dt * vx;
       const ny = y + dt * vy;
@@ -337,6 +344,7 @@ export class CpuMpm {
       p[this.at(PLANE.E, i)] = r.e;
       p[this.at(PLANE.T, i)] = r.T;
       p[this.at(PLANE.D, i)] = r.D;
+      p[this.at(PLANE.PHI, i)] = r.phi;
 
       // Частица за пределами области (с запасом 1,5h, пока шаблон в сетке) удаляется
       const m = 1.5 * s.h;
@@ -364,7 +372,7 @@ export class CpuMpm {
   /** Давление частицы по EOS (без q), ГПа. */
   pressure(i: number): number {
     const mat = this.scene.materials[tagMaterial(this.tags[i])];
-    return pressureOf(mat, this.get(PLANE.J, i), this.get(PLANE.E, i), this.get(PLANE.D, i));
+    return pressureOf(mat, this.get(PLANE.J, i), this.get(PLANE.E, i), this.get(PLANE.D, i), this.get(PLANE.PHI, i));
   }
 
   isRemoved(i: number): boolean {

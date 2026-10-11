@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { CpuMpm } from '../src/cpu-ref/CpuMpm';
+import { pressureOf, solvePorosity } from '../src/cpu-ref/physics';
+import { kernelMaterial } from '../src/materials';
+import { mgPressure, porousPressure, voidThreshold } from '../src/materials/models';
 import { prepareScene, type SceneSpec } from '../src/scene/scene';
 import { demoScene } from '../src/scene/scenes';
 import { Bc, PLANE } from '../src/sim/layout';
@@ -61,5 +64,43 @@ describe('CPU-эталон MLS-MPM (M1)', () => {
     a.step(100);
     b.step(100);
     expect(Buffer.from(a.p.buffer).equals(Buffer.from(b.p.buffer))).toBe(true);
+  });
+});
+
+describe('Пористость (откол, 5.5)', () => {
+  const cu = kernelMaterial('copper_ofhc');
+  const dt = 0.05;
+  // Давление на конце шага при пористости φ: объём частицы J задан, e = 0
+  const pAt = (J: number) => (phi: number) => porousPressure(cu, J, 0, phi);
+
+  it('ниже порога σ_eq(φ0) пористость не меняется', () => {
+    expect(-pAt(1.001)(cu.phi0)).toBeLessThan(voidThreshold(cu, cu.phi0));
+    expect(solvePorosity(cu, cu.phi0, false, dt, pAt(1.001))).toBe(cu.phi0);
+  });
+
+  it('сверх порога поры растут по неявному Эйлеру и разгружают растяжение', () => {
+    const p = pAt(1.02);
+    const phi = solvePorosity(cu, cu.phi0, false, dt, p);
+    expect(phi).toBeGreaterThan(2 * cu.phi0);
+    expect(-p(phi)).toBeLessThan(-p(cu.phi0));
+    // ln φ − ln φ0 = (dt/η)·(σ_m − σ_eq(φ)) на конце шага
+    const rate = (dt / cu.etaV) * (-p(phi) - voidThreshold(cu, phi));
+    expect(Math.abs(Math.log(phi / cu.phi0) - rate)).toBeLessThan(1e-5);
+  });
+
+  it('сжатие схлопывает поры, но не ниже φ0', () => {
+    const phi = solvePorosity(cu, 0.1, false, dt, pAt(0.95));
+    expect(phi).toBeLessThan(0.1);
+    expect(phi).toBeGreaterThanOrEqual(cu.phi0);
+  });
+
+  it('разрушенный материал растяжения не держит — поры не растут', () => {
+    expect(solvePorosity(cu, 0.02, true, dt, pAt(1.05))).toBe(0.02);
+  });
+
+  it('у материала без модели пористости давление — Ми–Грюнайзен', () => {
+    const steel = kernelMaterial('steel_4340');
+    expect(steel.phi0).toBe(0);
+    expect(pressureOf(steel, 0.97, 0.3, 0, 0)).toBe(mgPressure(steel, 0.97, 0.3));
   });
 });
