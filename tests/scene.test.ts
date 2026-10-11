@@ -4,7 +4,7 @@ import { T_ROOM } from '../src/materials/models';
 import { taylorScene } from '../src/scene/scenes';
 import { fixedPointScales, kineticVelocityBound, particleMass, prepareScene } from '../src/scene/scene';
 import { benchSceneSpec, demoScene } from '../src/scene/scenes';
-import { GRID_PAD, PLANE, tagBody, tagField, tagMaterial } from '../src/sim/layout';
+import { GRID_PAD, NODE_MASS_MARGIN, PLANE, tagBody, tagField, tagMaterial } from '../src/sim/layout';
 
 describe('подготовка сцены', () => {
   it('плоский режим: V0 = Δx², J = 1, T = T_room, масса = ρ0·V0', () => {
@@ -41,13 +41,15 @@ describe('подготовка сцены', () => {
     expect(s.origin[0] + (s.gx - 1 - GRID_PAD) * s.h).toBeGreaterThanOrEqual(160 - 1e-9);
   });
 
-  it('фиксированная точка: узел с массой ppc²·m и запасом ×4 помещается в 2^30', () => {
+  it('фиксированная точка: узел с массой ppc²·m и запасом на скучивание помещается в 2^30', () => {
     const { massScale, momScale, kScale } = fixedPointScales(2, 2, 1.5, 5.7, 0.5);
-    expect(4 * 2 * 4 * massScale).toBeCloseTo(2 ** 30, 0);
-    expect(4 * 2 * 4 * (1.5 + 3 * 5.7) * 4 * momScale).toBeCloseTo(2 ** 30, 0);
+    const nodeMass = 4 * 2 * NODE_MASS_MARGIN;
+    expect(NODE_MASS_MARGIN).toBeGreaterThanOrEqual(16);
+    expect(nodeMass * massScale).toBeCloseTo(2 ** 30, 0);
+    expect(nodeMass * (1.5 + 3 * 5.7) * 4 * momScale).toBeCloseTo(2 ** 30, 0);
     // K — без импульса напряжений: граница по скоростям частиц, а не по скорости звука
     expect(kineticVelocityBound(1.5, 5.7)).toBeCloseTo(3 * 1.5 + 0.05 * 5.7, 12);
-    expect(4 * 2 * 4 * kineticVelocityBound(1.5, 5.7) ** 2 * 2 * kScale).toBeCloseTo(2 ** 30, 0);
+    expect(nodeMass * kineticVelocityBound(1.5, 5.7) ** 2 * 2 * kScale).toBeCloseTo(2 ** 30, 0);
   });
 
   it('начальный Δt положителен и не больше Куранта по скорости звука', () => {

@@ -6,7 +6,7 @@
 
 import { kernelMaterial } from '../materials';
 import { T_ROOM, soundSpeed, type KernelMaterial } from '../materials/models';
-import { Bc, GRID_PAD, MAX_MATERIALS, PLANE, PLANE_COUNT, packTag } from '../sim/layout';
+import { Bc, GRID_PAD, NODE_MASS_MARGIN, MAX_MATERIALS, PLANE, PLANE_COUNT, packTag } from '../sim/layout';
 import { C_CFL } from './presets';
 
 export type GeometryMode = 'plane' | 'axisym';
@@ -83,6 +83,13 @@ export interface PreparedScene {
   friction: number;
   /** Минимальный радиус в членах σθθ/r и v_r/r (осесимметричный режим), мм */
   rmin: number;
+  /**
+   * Осесимметричный режим: радиус, к которому GPU приводит массу узла (масса частицы ∝ r, у оси узлы в десятки
+   * раз легче и теряют разряды фиксированной точки). Узел копит вклады ×nodeRefRadius/max(r_узла, h); в сетке
+   * всё считается отношениями накопителей одного узла, так что результат от множителя не зависит.
+   * 0 — плоский режим, без приведения.
+   */
+  nodeRefRadius: number;
   massScale: number;
   momScale: number;
   gradScale: number;
@@ -108,12 +115,6 @@ export function signalSpeed(c: number, divV: number, L: number, c1: number, c2: 
 }
 
 /**
- * Масштабы фиксированной точки для P2G на i32-атомиках (4.6).
- * Узел набирает массу ≈ ppcAxis² частиц; запас ×4 на сжатие. Импульс: m·v плюс импульс напряжений
- * за шаг — граница m·(vMax + 3·cMax), запас ×4; кинетическая энергия частиц в узле — ½·m·(vMax + 3·cMax)²,
- * запас ×4. «Градиент» массы Σ m·w·d ≤ масса узла·1,5h. Целимся в 2^30, до 2^31 — двукратный запас.
- */
-/**
  * Граница скорости для накопителя кинетической энергии: в K входят только скорости частиц u = v + C·d,
  * без импульса напряжений, — им не нужен запас на скорость звука. Скорость за ударом не больше скорости
  * удара, разброс C·d в ячейке — того же порядка; 3·vMax с запасом на осколки, плюс 0,05·cMax на упругие
@@ -124,6 +125,12 @@ export function kineticVelocityBound(vMax: number, cMax: number): number {
   return 3 * vMax + 0.05 * cMax;
 }
 
+/**
+ * Масштабы фиксированной точки для P2G на i32-атомиках (4.6). Масса узла — до NODE_MASS_MARGIN номинальных.
+ * Импульс: m·v плюс импульс напряжений за шаг — граница m·(vMax + 3·cMax), запас ×4; кинетическая энергия
+ * частиц в узле — ½·m·vk², запас ×4 (vk — kineticVelocityBound). «Градиент» массы Σ m·w·d ≤ масса узла·1,5h.
+ * Целимся в 2^30, до 2^31 — двукратный запас; переход 2^30 поднимает флаг переполнения.
+ */
 export function fixedPointScales(
   maxParticleMass: number,
   ppcAxis: number,
@@ -131,7 +138,7 @@ export function fixedPointScales(
   cMax: number,
   h: number,
 ): { massScale: number; momScale: number; gradScale: number; kScale: number } {
-  const nodeMass = ppcAxis * ppcAxis * maxParticleMass * 4;
+  const nodeMass = ppcAxis * ppcAxis * maxParticleMass * NODE_MASS_MARGIN;
   const vb = vMax + 3 * cMax;
   const vk = kineticVelocityBound(vMax, cMax);
   return {
@@ -170,6 +177,9 @@ export function prepareScene(spec: SceneSpec): PreparedScene {
     planes[plane * n + i] = v;
   };
 
+  // Осесимметричный режим: масса узла на GPU приводится к наибольшему радиусу частиц (nodeRefRadius)
+  let rRef = 0;
+  if (axisym) for (const b of spec.bodies) rRef = Math.max(rRef, b.rect.x1);
   let i = 0;
   let maxMass = 0;
   let vMax = 0;
@@ -204,7 +214,7 @@ export function prepareScene(spec: SceneSpec): PreparedScene {
         set(PLANE.T, i, T_ROOM);
         set(PLANE.VOL0, i, vol0);
         tags[i] = packTag(mi, b.bodyId, b.field);
-        maxMass = Math.max(maxMass, particleMass(mat, vol0));
+        maxMass = Math.max(maxMass, particleMass(mat, axisym ? Math.fround(dx * dx * rRef) : vol0));
         const speed = Math.hypot(vx, vy);
         vMax = Math.max(vMax, speed);
         maxSignal = Math.max(maxSignal, signalSpeed(c, 0, h, c1, c2) + speed);
@@ -233,6 +243,7 @@ export function prepareScene(spec: SceneSpec): PreparedScene {
     c2,
     friction: spec.friction ?? 0,
     rmin: 0.25 * dx,
+    nodeRefRadius: rRef,
     ...scales,
     dt0: (cfl * dx) / maxSignal,
     materials,

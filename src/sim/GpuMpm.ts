@@ -222,6 +222,7 @@ export class GpuMpm {
     u.set([s.bc.left, s.bc.right, s.bc.bottom, s.bc.top], 28);
     // Тот же f32, что засеян в плоскость VOL0 в плоском режиме
     f[32] = Math.fround(s.dx * s.dx);
+    f[33] = s.nodeRefRadius;
     for (let m = 0; m < Math.min(s.materials.length, MAX_MATERIALS); m++) {
       const mat = s.materials[m];
       const etaMax = mat.s > 0 ? 0.9 / mat.s : 0.9;

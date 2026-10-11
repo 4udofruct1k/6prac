@@ -1,7 +1,7 @@
 {
   "name": "terminal-armor-sim",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "TERMINAL — симулятор пробития брони (2D MLS-MPM на WebGPU). Спека: docs/ARMOR_SPEC.md",
   "scripts": {

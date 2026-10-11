@@ -60,7 +60,10 @@ struct Params {
   vizMode: u32, storeAux: u32, axisym: u32, lockX: u32,
   bcLeft: u32, bcRight: u32, bcBottom: u32, bcTop: u32,
   // Объём частицы в плоском режиме Δx² — тем же f32, что засеян в плоскость VOL0
-  vol0: f32, _h0: f32, _h1: f32, _h2: f32,
+  vol0: f32,
+  // Осесимметричный режим: радиус приведения массы узла (PreparedScene.nodeRefRadius), 0 — без приведения
+  nodeRefR: f32,
+  _h1: f32, _h2: f32,
   mats: array<Material, ${MAX_MATERIALS}>,
 }
 
@@ -120,6 +123,18 @@ fn accIndex(field: u32, k: u32, node: u32) -> u32 {
 
 fn toFixed(v: f32, scale: f32) -> i32 {
   return i32(round(v * scale));
+}
+
+// Хеш PCG: детерминированный «случайный» сдвиг для округления без смещения
+fn pcg(v: u32) -> u32 {
+  let state = v * 747796405u + 2891336453u;
+  let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+  return (word >> 22u) ^ word;
+}
+
+// Округление вниз со сдвигом u ∈ [0, 1): E[floor(x + u)] = x — без смещения и для вкладов меньше кванта
+fn toFixedDither(v: f32, scale: f32, u: f32) -> i32 {
+  return i32(floor(v * scale + u));
 }
 
 // ---------- Модели материалов (src/materials/models.ts, src/cpu-ref/physics.ts) ----------
@@ -346,9 +361,16 @@ fn scatter(i: u32, tag: u32, x: vec2f, v: vec2f, c: vec4f, sxx: f32, syy: f32, s
   }
   let field = (tag >> 16u) & 1u;
   let s = stencil(x);
+  // Сдвиг округления K: от частицы и шага, свой для каждого узла шаблона
+  let seed = pcg(i ^ pcg(atomicLoad(&stepState[S_STEPS])));
   for (var b = 0; b < 3; b++) {
     for (var a = 0; a < 3; a++) {
-      let w = s.wx[a] * s.wy[b];
+      // Осесимметричный режим: масса узла ∝ r — приводим к nodeRefR, чтобы у оси хватало разрядов
+      // фиксированной точки. В gridUpdate всё — отношения накопителей одного узла: результат тот же.
+      var w = s.wx[a] * s.wy[b];
+      if (P.nodeRefR > 0.0) {
+        w *= P.nodeRefR / max(P.originX + f32(s.base.x + a) * P.h, P.h);
+      }
       let d = (vec2f(f32(a), f32(b)) - s.fx) * P.h;
       let u = v + vec2f(c.x * d.x + c.y * d.y, c.z * d.x + c.w * d.y);
       let imp = vec2f(k * (s00 * d.x + s01 * d.y) + hoop, k * (s01 * d.x + s11 * d.y));
@@ -358,7 +380,10 @@ fn scatter(i: u32, tag: u32, x: vec2f, v: vec2f, c: vec4f, sxx: f32, syy: f32, s
       atomicAdd(&grid[accIndex(field, A_PY, node)], toFixed(w * (m * u.y + imp.y), P.momScale));
       atomicAdd(&grid[accIndex(field, A_IX, node)], toFixed(w * imp.x, P.momScale));
       atomicAdd(&grid[accIndex(field, A_IY, node)], toFixed(w * imp.y, P.momScale));
-      atomicAdd(&grid[accIndex(field, A_K, node)], toFixed(0.5 * w * m * dot(u, u), P.kScale));
+      // K копит положительные вклады, хвосты шаблона меньше кванта: обычное округление всегда давало бы 0
+      // и занижало K — потеря P2G уходила бы в минус. Сдвиг из хеша делает округление несмещённым.
+      let du = f32(pcg(seed + u32(a + 3 * b)) >> 8u) * (1.0 / 16777216.0);
+      atomicAdd(&grid[accIndex(field, A_K, node)], toFixedDither(0.5 * w * m * dot(u, u), P.kScale, du));
       atomicAdd(&grid[accIndex(field, A_GX, node)], toFixed(w * m * d.x, P.gradScale));
       atomicAdd(&grid[accIndex(field, A_GY, node)], toFixed(w * m * d.y, P.gradScale));
     }
